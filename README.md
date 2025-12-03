@@ -14,12 +14,13 @@ FVG BOSS CHOCH TRINAGLE HEAD$SHOLDERS
   Exit date:        2025-11-15 12:30:00+00:00
   Price path mini-chart (LONG):
       Timeframe: 10 candles
+      
+      
       Legend: S=start, P=pre-exit, U=user-entry, E=exit
-   S                            
-    █                           
-     █                          
-      █                         
-       █                        
+   S █                           
+       █                          
+        █                         
+        █                        
    P   █                        
         █                       
      U  █                       
