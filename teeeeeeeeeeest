@@ -1,0 +1,815 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Live Trading Bot - Demo Mode with Telegram Reporting + Interactive Commands
+Демо-бот для торговли фьючерсами BTCUSDT на Binance.
+Работает в демо-режиме (без реальных ордеров), с обнаружением паттернов,
+управлением позициями, логированием в БД и отчётами в Telegram.
+Совместим с актуальными версиями библиотек (2024-2025).
+Требуется Python 3.8+.
+
+Добавлен режим бэктеста на исторических данных: запуск с аргументами --backtest start_date end_date (формат YYYY-MM-DD).
+"""
+import os
+import sys
+import time
+import json
+import hmac
+import hashlib
+import sqlite3
+import threading
+import requests
+import traceback
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional, Tuple
+from collections import deque
+import pandas as pd
+import numpy as np
+import websocket
+# Telegram Bot API (python-telegram-bot v20+)
+try:
+    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    from telegram.error import TelegramError
+    TELEGRAM_AVAILABLE = True
+except ImportError: # pragma: no cover
+    TELEGRAM_AVAILABLE = False
+    print("WARNING: python-telegram-bot not installed. Run: pip install python-telegram-bot")
+# ========================= CONFIGURATION =========================
+# MARKET SETTINGS
+MARKET_SYMBOL = "BTCUSDT" # Торгуемая пара
+TRADE_INTERVAL = "15m" # Интервал свечей
+# CAPITAL & RISK
+INITIAL_CAPITAL = 1000.0 # Начальный демо-капитал в USDT
+BASE_POSITION_USD = 10.0 # Базовый размер позиции в USD
+DEFAULT_LEVERAGE = 30 # Плечо по умолчанию
+FEE_RATE = 0.0004 # Комиссия taker (0.04%)
+# BINANCE API (leave empty for demo mode)
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
+# TELEGRAM BOT - REPLACE WITH YOUR VALUES
+TELEGRAM_BOT_TOKEN = "7949835530:AAGBbZewV_4naNU6kph-_xsS5YqE0qqwXzw" # Токен от @BotFather
+TELEGRAM_CHAT_ID = "7949835530" # Ваш Telegram user ID (можно узнать у @userinfobot)
+# FUTURES ENDPOINTS
+FUTURES_REST_BASE = "https://fapi.binance.com"
+FUTURES_WS_BASE = "wss://fstream.binance.com/ws"
+# PATTERN CONFIGURATION
+# Параметры TP/SL в процентах, scale — коэффициент увеличения размера позиции
+PATTERN_CONFIG = {
+    "Bullish Flag": {"tp": 1.0, "sl": 0.25, "scale": 0.1, "candle_pct": 0.3},
+    "Bearish Flag": {"tp": 1.0, "sl": 0.25, "scale": 0.1, "candle_pct": 0.3},
+    "Ascending Triangle": {"tp": 1.0, "sl": 0.25, "scale": 0.8, "candle_pct": 0.3},
+    "Descending Triangle": {"tp": 1.0, "sl": 0.25, "scale": 0.8, "candle_pct": 0.3},
+    "Symmetrical Triangle": {"tp": 0.5, "sl": 0.25, "scale": 0.8, "candle_pct": 0.3},
+    "Rising Wedge": {"tp": 0.25, "sl": 0.5, "scale": 0.4, "candle_pct": 0.4},
+    "Falling Wedge": {"tp": 0.25, "sl": 0.5, "scale": 0.4, "candle_pct": 0.4},
+    "FVG Up": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "candle_pct": 0.7},
+    "FVG Down": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "candle_pct": 0.7},
+    "BOS Up": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "candle_pct": 0.6},
+    "BOS Down": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "candle_pct": 0.6},
+    "Head & Shoulders": {"tp": 0.75, "sl": 0.5, "scale": 0.8, "candle_pct": 0.8},
+}
+# DATABASE & LOGS
+DB_FILE = f"live_trading_{MARKET_SYMBOL}.db"
+LOG_FILE = "live_trading.log"
+# DAILY REPORT TIME (UTC)
+DAILY_REPORT_HOUR = 0 # В 00:00 UTC отправляем дневной отчёт
+# BUFFER SIZE
+LIVE_BUFFER_SIZE = 500 # Максимальное количество свечей в буфере
+# ========================= LOGGING =========================
+def log(msg: str, level: str = "INFO") -> None:
+    """
+    Записывает сообщение в консоль и в файл лога.
+    Args:
+        msg: Текст сообщения.
+        level: Уровень лога (INFO, ERROR, WARN и т.д.).
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = f"[{ts}] [{level}] {msg}"
+    print(line)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+# ========================= DATABASE =========================
+def init_database() -> None:
+    """Создаёт (если не существует) SQLite-базу с таблицами positions и daily_stats."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            open_time INTEGER,
+            pattern TEXT,
+            side TEXT,
+            entry_price REAL,
+            size_usd REAL,
+            leverage INTEGER,
+            tp_price REAL,
+            sl_price REAL,
+            status TEXT,
+            close_time INTEGER,
+            close_price REAL,
+            pnl REAL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date TEXT PRIMARY KEY,
+            total_trades INTEGER,
+            wins INTEGER,
+            losses INTEGER,
+            total_pnl REAL,
+            capital REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+    log("Database initialized", "DB")
+def save_position(pos: Dict) -> None:
+    """
+    Сохраняет открытую позицию в БД и добавляет db_id в словарь позиции.
+    Args:
+        pos: Словарь с данными позиции.
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO positions (open_time, pattern, side, entry_price, size_usd,
+                               leverage, tp_price, sl_price, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (pos["open_time"], pos["pattern"], pos["side"], pos["entry_price"],
+          pos["size_usd"], pos["leverage"], pos["tp_price"], pos["sl_price"], "OPEN"))
+    conn.commit()
+    pos["db_id"] = c.lastrowid
+    conn.close()
+def close_position(db_id: int, close_time: int, close_price: float, pnl: float) -> None:
+    """
+    Обновляет запись позиции в БД после закрытия.
+    Args:
+        db_id: ID записи в таблице positions.
+        close_time: Время закрытия (ms timestamp).
+        close_price: Цена закрытия.
+        pnl: Прибыль/убыток в USD.
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        UPDATE positions SET status='CLOSED', close_time=?, close_price=?, pnl=?
+        WHERE id=?
+    """, (close_time, close_price, pnl, db_id))
+    conn.commit()
+    conn.close()
+def save_daily_stats(stats: Dict) -> None:
+    """
+    Сохраняет или обновляет дневную статистику.
+    Args:
+        stats: Словарь со статистикой за день.
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO daily_stats (date, total_trades, wins, losses, total_pnl, capital)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (stats["date"], stats["total_trades"], stats["wins"],
+          stats["losses"], stats["total_pnl"], stats["capital"]))
+    conn.commit()
+    conn.close()
+# ========================= TELEGRAM =========================
+class TelegramReporter:
+    """
+    Класс для отправки уведомлений и отчётов в Telegram.
+    Работает асинхронно, но имеет синхронный wrapper.
+    """
+    def __init__(self, token: str, chat_id: str):
+        """
+        Инициализирует репортёр.
+        Args:
+            token: Токен Telegram-бота.
+            chat_id: ID чата (обычно ваш личный user ID).
+        """
+        self.enabled = TELEGRAM_AVAILABLE and token and chat_id
+        self.token = token
+        self.chat_id = chat_id
+        self.bot = None
+        if self.enabled:
+            try:
+                self.bot = Bot(token=token)
+                log("Telegram reporter initialized", "TELEGRAM")
+            except Exception as e:
+                log(f"Telegram init error: {e}", "ERROR")
+                self.enabled = False
+        else:
+            log("Telegram reporter disabled (missing token/chat_id or library)", "WARN")
+    async def send_async(self, message: str, reply_markup=None) -> None:
+        """Асинхронная отправка сообщения."""
+        if not self.enabled or not self.bot:
+            return
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            log(f"Telegram send error: {e}", "ERROR")
+    def send(self, message: str, reply_markup=None) -> None:
+        """
+        Синхронный wrapper для отправки сообщения.
+        Автоматически выбирает подходящий способ запуска asyncio.
+        """
+        if not self.enabled:
+            return
+        try:
+            asyncio.run(self.send_async(message, reply_markup))
+        except RuntimeError:
+            # Если уже запущен event loop (например, в основном потоке)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.send_async(message, reply_markup))
+            else:
+                asyncio.run(self.send_async(message, reply_markup))
+        except Exception as e:
+            log(f"Telegram send wrapper error: {e}", "ERROR")
+telegram = TelegramReporter(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+# ========================= PATTERN DETECTION =========================
+def local_extrema(df: pd.DataFrame, window: int = 5) -> Tuple[List[int], List[int]]:
+    """
+    Находит локальные максимумы и минимумы по high/low.
+    Args:
+        df: DataFrame с колонками high/low.
+        window: Размер окна для rolling max/min.
+    Returns:
+        Кортеж (список индексов максимумов, список индексов минимумов).
+    """
+    high_max = df['high'].rolling(window, center=True).max()
+    low_min = df['low'].rolling(window, center=True).min()
+    highs = df[df['high'] == high_max].index.tolist()
+    lows = df[df['low'] == low_min].index.tolist()
+    return highs, lows
+def detect_flags(df: pd.DataFrame, lookback: int = 20, threshold: float = 0.005) -> List[Tuple]:
+    """
+    Обнаруживает флаги (бычий/медвежий).
+    Args:
+        df: DataFrame с ценами.
+        lookback: Количество свечей для анализа.
+        threshold: Минимальная волатильность для признания консолидации.
+    Returns:
+        Список кортежей (timestamp, название паттерна).
+    """
+    patterns = []
+    for i in range(lookback, len(df)):
+        seg = df['close'].iloc[i-lookback:i]
+        diff = seg.max() - seg.min()
+        if seg.min() <= 0:
+            continue
+        if diff / seg.min() < threshold:
+            slope = (seg.iloc[-1] - seg.iloc[0]) / seg.iloc[0]
+            if slope > 0.0:
+                patterns.append((seg.index[-1], "Bullish Flag"))
+            elif slope < 0.0:
+                patterns.append((seg.index[-1], "Bearish Flag"))
+    return patterns
+def detect_triangles(df: pd.DataFrame, lookback: int = 24) -> List[Tuple]:
+    """Обнаруживает треугольники (восходящий, нисходящий, симметричный)."""
+    patterns = []
+    for i in range(lookback, len(df)):
+        seg = df.iloc[i-lookback:i]
+        x = np.arange(len(seg))
+        try:
+            high_coef = np.polyfit(x, seg['high'].values, 1)[0]
+            low_coef = np.polyfit(x, seg['low'].values, 1)[0]
+        except Exception:
+            continue
+        if abs(high_coef) < 0.001 and low_coef > 0.0:
+            patterns.append((seg.index[-1], "Ascending Triangle"))
+        elif abs(low_coef) < 0.001 and high_coef < 0.0:
+            patterns.append((seg.index[-1], "Descending Triangle"))
+        elif high_coef < 0 and low_coef > 0:
+            patterns.append((seg.index[-1], "Symmetrical Triangle"))
+    return patterns
+def detect_fvg(df: pd.DataFrame, gap_perc: float = 0.002) -> List[Tuple]:
+    """
+    Обнаруживает Fair Value Gap (FVG) — разрывы между свечами.
+    Args:
+        df: DataFrame.
+        gap_perc: Минимальный размер гэпа в процентах.
+    """
+    patterns = []
+    for i in range(2, len(df)):
+        prev_high = df['high'].iloc[i-2]
+        prev_low = df['low'].iloc[i-2]
+        curr_open = df['open'].iloc[i]
+        if curr_open > prev_high * (1 + gap_perc):
+            patterns.append((df.index[i], "FVG Up"))
+        elif curr_open < prev_low * (1 - gap_perc):
+            patterns.append((df.index[i], "FVG Down"))
+    return patterns
+def detect_bos(df: pd.DataFrame, window: int = 5) -> List[Tuple]:
+    """Обнаруживает Break of Structure (BOS) — пробой предыдущих экстремумов."""
+    patterns = []
+    highs, lows = local_extrema(df, window)
+    for i in range(1, len(highs)):
+        try:
+            if df.loc[highs[i], 'high'] > df.loc[highs[i-1], 'high']:
+                patterns.append((highs[i], "BOS Up"))
+        except Exception:
+            continue
+    for i in range(1, len(lows)):
+        try:
+            if df.loc[lows[i], 'low'] < df.loc[lows[i-1], 'low']:
+                patterns.append((lows[i], "BOS Down"))
+        except Exception:
+            continue
+    return patterns
+def detect_head_shoulders(df: pd.DataFrame, window: int = 5, threshold: float = 0.01) -> List[Tuple]:
+    """Обнаруживает паттерн «Голова и плечи» (инверсный не реализован)."""
+    patterns = []
+    for i in range(window, len(df) - window):
+        left_max = df['high'].iloc[i-window:i].max()
+        head = df['high'].iloc[i]
+        right_max = df['high'].iloc[i+1:i+1+window].max()
+        if head > left_max * (1 + threshold) and head > right_max * (1 + threshold):
+            patterns.append((df.index[i], "Head & Shoulders"))
+    return patterns
+def detect_all_patterns(df: pd.DataFrame) -> List[Tuple]:
+    """
+    Запускает все функции обнаружения паттернов и объединяет результаты.
+    Returns:
+        Список кортежей (timestamp, название паттерна).
+    """
+    all_patterns = []
+    try:
+        all_patterns += detect_flags(df)
+        all_patterns += detect_triangles(df)
+        all_patterns += detect_fvg(df)
+        all_patterns += detect_bos(df)
+        all_patterns += detect_head_shoulders(df)
+    except Exception as e:
+        log(f"Pattern detection error: {e}", "ERROR")
+    return all_patterns
+# ========================= MARKET SENTIMENT =========================
+def calculate_market_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Анализирует рыночное настроение на основе последних 20 свечей,
+    EMA9/EMA21 и количества бычьих/медвежьих свечей.
+    Returns:
+        Словарь с данными о настроении.
+    """
+    if len(df) < 20:
+        return {"sentiment": "UNKNOWN", "strength": 0, "description": "Not enough data",
+                "bullish_candles": 0, "bearish_candles": 0, "volatility": 0,
+                "price_vs_ema9": "unknown", "price_vs_ema21": "unknown"}
+    recent = df.iloc[-20:]
+    bullish_candles = (recent['close'] > recent['open']).sum()
+    bearish_candles = (recent['close'] < recent['open']).sum()
+    ema_short = df['close'].ewm(span=9, adjust=False).mean().iloc[-1]
+    ema_long = df['close'].ewm(span=21, adjust=False).mean().iloc[-1]
+    current_price = df['close'].iloc[-1]
+    volatility = (df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean() / df['close'].iloc[-20:].mean() * 100
+    if bullish_candles > bearish_candles * 1.5 and current_price > ema_short > ema_long:
+        sentiment = "BULLISH"
+        strength = min(100, int((bullish_candles / 20) * 100))
+        description = "Strong uptrend"
+    elif bearish_candles > bullish_candles * 1.5 and current_price < ema_short < ema_long:
+        sentiment = "BEARISH"
+        strength = min(100, int((bearish_candles / 20) * 100))
+        description = "Strong downtrend"
+    elif abs(bullish_candles - bearish_candles) <= 3:
+        sentiment = "NEUTRAL"
+        strength = 50
+        description = "Sideways consolidation"
+    else:
+        sentiment = "UNCERTAIN"
+        strength = 60
+        description = "Weak trend or reversal"
+    return {
+        "sentiment": sentiment,
+        "strength": strength,
+        "description": description,
+        "bullish_candles": int(bullish_candles),
+        "bearish_candles": int(bearish_candles),
+        "volatility": round(float(volatility), 2),
+        "price_vs_ema9": "above" if current_price > ema_short else "below",
+        "price_vs_ema21": "above" if current_price > ema_long else "below"
+    }
+# ========================= DEMO BROKER =========================
+class DemoBroker:
+    """
+    Демо-брокер — эмулирует торговлю без реального исполнения ордеров.
+    Управляет капиталом, позициями и расчётом PnL.
+    """
+    def __init__(self):
+        self.capital = INITIAL_CAPITAL
+        self.positions: List[Dict] = []
+        self.closed_positions: List[Dict] = []
+        self.lock = threading.Lock()
+    def open_position(self, pattern: str, side: str, entry_price: float,
+                      tp_price: float, sl_price: float, size_usd: float, leverage: int) -> None:
+        """
+        Открывает демо-позицию и сохраняет её в БД.
+        """
+        with self.lock:
+            pos = {
+                "open_time": int(time.time() * 1000),
+                "pattern": pattern,
+                "side": side,
+                "entry_price": entry_price,
+                "size_usd": size_usd,
+                "leverage": leverage,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "qty": (size_usd * leverage) / entry_price
+            }
+            save_position(pos)
+            self.positions.append(pos)
+            log(f"POSITION OPENED: {side} {pattern} @ {entry_price:.2f} | TP: {tp_price:.2f} | SL: {sl_price:.2f}", "TRADE")
+            msg = f"<b>🔔 NEW POSITION</b>\n\n"
+            msg += f"📊 Pattern: {pattern}\n"
+            msg += f"{'📈' if side == 'LONG' else '📉'} Side: {side}\n"
+            msg += f"💰 Entry: ${entry_price:.2f}\n"
+            msg += f"🎯 TP: ${tp_price:.2f}\n"
+            msg += f"🛑 SL: ${sl_price:.2f}\n"
+            msg += f"💵 Size: ${size_usd:.2f} x{leverage}"
+            telegram.send(msg)
+    def check_positions(self, current_price: float) -> None:
+        """Проверяет все открытые позиции на достижение TP/SL."""
+        with self.lock:
+            for pos in self.positions[:]:
+                hit_tp = (pos["side"] == "LONG" and current_price >= pos["tp_price"]) or \
+                         (pos["side"] == "SHORT" and current_price <= pos["tp_price"])
+                hit_sl = (pos["side"] == "LONG" and current_price <= pos["sl_price"]) or \
+                         (pos["side"] == "SHORT" and current_price >= pos["sl_price"])
+                if hit_tp or hit_sl:
+                    close_price = pos["tp_price"] if hit_tp else pos["sl_price"]
+                    pnl = self._calculate_pnl(pos, close_price)
+                    close_time = int(time.time() * 1000)
+                    close_position(pos["db_id"], close_time, close_price, pnl)
+                    self.capital += pnl
+                    self.positions.remove(pos)
+                    self.closed_positions.append({**pos, "close_price": close_price, "pnl": pnl})
+                    result = "✅ TP HIT" if hit_tp else "❌ SL HIT"
+                    log(f"POSITION CLOSED: {result} {pos['pattern']} @ {close_price:.2f} | PNL: {pnl:.2f}", "TRADE")
+                    msg = f"<b>{result}</b>\n\n"
+                    msg += f"📊 Pattern: {pos['pattern']}\n"
+                    msg += f"Side: {pos['side']}\n"
+                    msg += f"Entry: ${pos['entry_price']:.2f}\n"
+                    msg += f"Exit: ${close_price:.2f}\n"
+                    msg += f"{'💰' if pnl > 0 else '💸'} PNL: ${pnl:.2f}\n"
+                    msg += f"💵 Capital: ${self.capital:.2f}"
+                    telegram.send(msg)
+    def _calculate_pnl(self, pos: Dict, close_price: float) -> float:
+        """Расчёт PnL с учётом комиссии."""
+        if pos["side"] == "LONG":
+            price_diff = close_price - pos["entry_price"]
+        else:
+            price_diff = pos["entry_price"] - close_price
+        pnl = price_diff * pos["qty"]
+        fee = pos["size_usd"] * pos["leverage"] * FEE_RATE * 2 # Открытие + закрытие
+        return pnl - fee
+    def get_stats(self) -> Dict[str, Any]:
+        """Возвращает текущую статистику торговли."""
+        with self.lock:
+            total = len(self.closed_positions)
+            wins = sum(1 for p in self.closed_positions if p["pnl"] > 0)
+            losses = total - wins
+            total_pnl = sum(p["pnl"] for p in self.closed_positions)
+            return {
+                "capital": self.capital,
+                "total_trades": total,
+                "wins": wins,
+                "losses": losses,
+                "total_pnl": total_pnl,
+                "open_positions": len(self.positions)
+            }
+# ========================= BACKTEST FUNCTIONS =========================
+def fetch_historical_data(start_date: str, end_date: str) -> List[Dict]:
+    """
+    Загружает исторические данные свечей с Binance за период.
+    Args:
+        start_date: Начальная дата (YYYY-MM-DD)
+        end_date: Конечная дата (YYYY-MM-DD)
+    Returns:
+        Список словарей с данными свечей.
+    """
+    symbol = MARKET_SYMBOL
+    interval = TRADE_INTERVAL
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    limit = 1000  # Максимум на запрос
+    klines = []
+    while start_ts < end_ts:
+        url = f"{FUTURES_REST_BASE}/fapi/v1/klines"
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": start_ts,
+            "endTime": end_ts,
+            "limit": limit
+        }
+        try:
+            response = requests.get(url, params=params)
+            data = response.json()
+            if not data:
+                break
+            klines.extend(data)
+            start_ts = data[-1][0] + 1  # Следующий после последней свечи
+        except Exception as e:
+            log(f"Error fetching historical data: {e}", "ERROR")
+            break
+    candles = []
+    for k in klines:
+        candles.append({
+            "timestamp": pd.to_datetime(k[0], unit="ms", utc=True),
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+            "volume": float(k[5]),
+            "is_closed": True  # Все исторические свечи закрыты
+        })
+    log(f"Fetched {len(candles)} candles from {start_date} to {end_date}", "BACKTEST")
+    return candles
+
+def run_backtest(start_date: str, end_date: str):
+    """
+    Запускает бэктест на исторических данных.
+    Симулирует торговлю, как в живом режиме.
+    """
+    historical_candles = fetch_historical_data(start_date, end_date)
+    if not historical_candles:
+        log("No historical data fetched. Exiting backtest.", "ERROR")
+        return
+
+    broker = DemoBroker()  # Отдельный брокер для бэктеста
+    candle_buffer = deque(maxlen=LIVE_BUFFER_SIZE)
+    last_patterns: List[Tuple] = []
+
+    for candle in historical_candles:
+        candle_buffer.append(candle)
+        current_price = candle["close"]
+        broker.check_positions(current_price)
+        if len(candle_buffer) >= 50:
+            df = pd.DataFrame(list(candle_buffer))
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            df = df.set_index("timestamp")
+            patterns = detect_all_patterns(df)
+            last_patterns = patterns[-5:] if len(patterns) >= 5 else patterns
+            if patterns:
+                latest_ts, pattern_name = patterns[-1]
+                if len(broker.positions) > 0:
+                    log(f"Pattern {pattern_name} detected but position already open", "SKIP")
+                    continue
+                cfg = PATTERN_CONFIG.get(pattern_name, {})
+                tp_pct = cfg.get("tp", 0.5)
+                sl_pct = cfg.get("sl", 0.25)
+                scale = cfg.get("scale", 0.5)
+                entry_price = df.iloc[-1]["close"]
+                side = "LONG"
+                if any(x in pattern_name for x in ["Bear", "Descending", "Down", "Rising Wedge", "Head & Shoulders"]):
+                    side = "SHORT"
+                if side == "LONG":
+                    tp_price = entry_price * (1 + tp_pct / 100)
+                    sl_price = entry_price * (1 - sl_pct / 100)
+                else:
+                    tp_price = entry_price * (1 - tp_pct / 100)
+                    sl_price = entry_price * (1 + sl_pct / 100)
+                size_usd = BASE_POSITION_USD * (1 + scale)
+                broker.open_position(
+                    pattern=pattern_name,
+                    side=side,
+                    entry_price=entry_price,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    size_usd=size_usd,
+                    leverage=DEFAULT_LEVERAGE
+                )
+
+    # В конце бэктеста закрыть все открытые позиции по последней цене
+    if broker.positions and historical_candles:
+        last_price = historical_candles[-1]["close"]
+        for pos in broker.positions[:]:
+            pnl = broker._calculate_pnl(pos, last_price)
+            close_time = int(time.time() * 1000)
+            close_position(pos["db_id"], close_time, last_price, pnl)
+            broker.capital += pnl
+            broker.closed_positions.append({**pos, "close_price": last_price, "pnl": pnl})
+            broker.positions.remove(pos)
+            log(f"BACKTEST: Forced close position {pos['pattern']} @ {last_price:.2f} | PNL: {pnl:.2f}", "TRADE")
+
+    stats = broker.get_stats()
+    winrate = (stats["wins"] / stats["total_trades"] * 100) if stats["total_trades"] > 0 else 0
+    msg = f"<b>📊 Backtest Report: {start_date} to {end_date}</b>\n\n"
+    msg += f"💰 Final Capital: ${stats['capital']:.2f}\n"
+    msg += f"📈 Total Trades: {stats['total_trades']}\n"
+    msg += f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
+    msg += f"🎯 Win Rate: {winrate:.1f}%\n"
+    msg += f"💵 Total PNL: ${stats['total_pnl']:.2f}"
+    log(msg.replace("<b>", "").replace("</b>", ""), "BACKTEST")
+    telegram.send(msg)
+# ========================= LIVE ENGINE =========================
+class LiveEngine:
+    """
+    Основной движок бота.
+    Подключается к WebSocket Binance, собирает свечи,
+    обнаруживает паттерны и управляет демо-позициями.
+    """
+    def __init__(self):
+        self.symbol = MARKET_SYMBOL.lower()
+        self.interval = TRADE_INTERVAL
+        self.ws_url = f"{FUTURES_WS_BASE}/{self.symbol}@kline_{self.interval}"
+        self.ws = None
+        self.candle_buffer = deque(maxlen=LIVE_BUFFER_SIZE)
+        self.broker = DemoBroker()
+        self.running = False
+        self.last_report_date = None
+        self.last_patterns: List[Tuple] = []
+    def start(self) -> None:
+        """Запускает движок и вспомогательные потоки."""
+        self.running = True
+        log("Starting Live Trading Engine...", "START")
+        telegram.send("<b>🤖 Live Trading Bot Started</b>")
+        ws_thread = threading.Thread(target=self._run_websocket, daemon=True)
+        ws_thread.start()
+        report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
+        report_thread.start()
+    def stop(self) -> None:
+        """Останавливает движок и закрывает WebSocket."""
+        self.running = False
+        if self.ws:
+            self.ws.close()
+        log("Live Trading Engine stopped", "STOP")
+    def _run_websocket(self) -> None:
+        """Основной цикл подключения к WebSocket с автопереподключением."""
+        while self.running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self.ws_url,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                    on_open=self._on_open
+                )
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                log(f"WebSocket error: {e}", "ERROR")
+                time.sleep(5)
+    def _on_open(self, ws) -> None:
+        log("WebSocket connected", "WS")
+    def _on_message(self, ws, message: str) -> None:
+        """Обрабатывает входящие сообщения от Binance (kline)."""
+        try:
+            data = json.loads(message)
+            if "k" not in data:
+                return
+            k = data["k"]
+            candle = {
+                "timestamp": pd.to_datetime(k["t"], unit="ms", utc=True),
+                "open": float(k["o"]),
+                "high": float(k["h"]),
+                "low": float(k["l"]),
+                "close": float(k["c"]),
+                "volume": float(k["v"]),
+                "is_closed": k["x"]
+            }
+            self.candle_buffer.append(candle)
+            current_price = candle["close"]
+            self.broker.check_positions(current_price)
+            if candle["is_closed"] and len(self.candle_buffer) >= 50:
+                self._check_patterns()
+        except Exception as e:
+            log(f"Message processing error: {e}", "ERROR")
+    def _on_error(self, ws, error) -> None:
+        log(f"WebSocket error: {error}", "ERROR")
+    def _on_close(self, ws, close_status_code, close_msg) -> None:
+        log("WebSocket closed", "WS")
+    def _check_patterns(self) -> None:
+        """Анализирует буфер свечей и открывает позицию при обнаружении паттерна."""
+        df = pd.DataFrame(list(self.candle_buffer))
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df = df.set_index("timestamp")
+        patterns = detect_all_patterns(df)
+        self.last_patterns = patterns[-5:] if len(patterns) >= 5 else patterns
+        if not patterns:
+            return
+        latest_ts, pattern_name = patterns[-1]
+        if len(self.broker.positions) > 0:
+            log(f"Pattern {pattern_name} detected but position already open", "SKIP")
+            return
+        cfg = PATTERN_CONFIG.get(pattern_name, {})
+        tp_pct = cfg.get("tp", 0.5)
+        sl_pct = cfg.get("sl", 0.25)
+        scale = cfg.get("scale", 0.5)
+        entry_price = df.iloc[-1]["close"]
+        side = "LONG"
+        if any(x in pattern_name for x in ["Bear", "Descending", "Down", "Rising Wedge", "Head & Shoulders"]):
+            side = "SHORT"
+        if side == "LONG":
+            tp_price = entry_price * (1 + tp_pct / 100)
+            sl_price = entry_price * (1 - sl_pct / 100)
+        else:
+            tp_price = entry_price * (1 - tp_pct / 100)
+            sl_price = entry_price * (1 + sl_pct / 100)
+        size_usd = BASE_POSITION_USD * (1 + scale)
+        self.broker.open_position(
+            pattern=pattern_name,
+            side=side,
+            entry_price=entry_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            size_usd=size_usd,
+            leverage=DEFAULT_LEVERAGE
+        )
+    def _daily_report_loop(self) -> None:
+        """Цикл отправки ежедневных отчётов в заданное время UTC."""
+        while self.running:
+            now = datetime.now(timezone.utc)
+            if now.hour == DAILY_REPORT_HOUR and now.date() != self.last_report_date:
+                self._send_daily_report()
+                self.last_report_date = now.date()
+            time.sleep(60)
+    def _send_daily_report(self) -> None:
+        """Формирует и отправляет дневной отчёт."""
+        stats = self.broker.get_stats()
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        save_daily_stats({
+            "date": date_str,
+            "total_trades": stats["total_trades"],
+            "wins": stats["wins"],
+            "losses": stats["losses"],
+            "total_pnl": stats["total_pnl"],
+            "capital": stats["capital"]
+        })
+        winrate = (stats["wins"] / stats["total_trades"] * 100) if stats["total_trades"] > 0 else 0
+        msg = f"<b>📊 Daily Report - {date_str}</b>\n\n"
+        msg += f"💰 Capital: ${stats['capital']:.2f}\n"
+        msg += f"📈 Total Trades: {stats['total_trades']}\n"
+        msg += f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
+        msg += f"🎯 Win Rate: {winrate:.1f}%\n"
+        msg += f"💵 Total PNL: ${stats['total_pnl']:.2f}\n"
+        msg += f"📊 Open Positions: {stats['open_positions']}"
+        log(msg.replace("<b>", "").replace("</b>", "").replace("💰", "").replace("📈", "")
+            .replace("✅", "").replace("❌", "").replace("🎯", "").replace("💵", "").replace("📊", ""), "REPORT")
+        telegram.send(msg)
+    def get_last_candle_info(self) -> str:
+        """Возвращает форматированную информацию о последней закрытой свече."""
+        if not self.candle_buffer:
+            return "No candle data available"
+        last = self.candle_buffer[-1]
+        change = ((last['close'] - last['open']) / last['open']) * 100
+        candle_type = "Bullish 📈" if last['close'] > last['open'] else "Bearish 📉"
+        msg = f"<b>🕯️ Last Candle ({TRADE_INTERVAL})</b>\n\n"
+        msg += f"Type: {candle_type}\n"
+        msg += f"Open: ${last['open']:.2f}\n"
+        msg += f"High: ${last['high']:.2f}\n"
+        msg += f"Low: ${last['low']:.2f}\n"
+        msg += f"Close: ${last['close']:.2f}\n"
+        msg += f"Change: {change:+.2f}%\n"
+        msg += f"Volume: {last['volume']:.2f}"
+        return msg
+    def get_sentiment_info(self) -> str:
+        """Возвращает форматированное описание текущего рыночного настроения."""
+        if len(self.candle_buffer) < 20:
+            return "Not enough data for sentiment analysis"
+        df = pd.DataFrame(list(self.candle_buffer))
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df = df.set_index("timestamp")
+        sentiment = calculate_market_sentiment(df)
+        emoji_map = {
+            "BULLISH": "🚀",
+            "BEARISH": "🐻",
+            "NEUTRAL": "😐",
+            "UNCERTAIN": "🤔"
+        }
+        msg = f"<b>🔮 Market Sentiment</b>\n\n"
+        msg += f"Status: {emoji_map.get(sentiment['sentiment'], '')} {sentiment['sentiment']}\n"
+        msg += f"Strength: {sentiment['strength']}%\n"
+        msg += f"Description: {sentiment['description']}\n\n"
+        msg += f"📊 Bullish candles: {sentiment['bullish_candles']}/20\n"
+        msg += f"📊 Bearish candles: {sentiment['bearish_candles']}/20\n"
+        msg += f"📊 Volatility: {sentiment['volatility']}%\n\n"
+        msg += f"Price vs EMA9: {sentiment['price_vs_ema9']}\n"
+        msg += f"Price vs EMA21: {sentiment['price_vs_ema21']}"
+        return msg
+# ========================= ENTRY POINT =========================
+if __name__ == "__main__":
+    init_database()
+    if len(sys.argv) > 1 and sys.argv[1] == "--backtest":
+        if len(sys.argv) != 4:
+            print("Usage: python script.py --backtest YYYY-MM-DD YYYY-MM-DD")
+            sys.exit(1)
+        start_date = sys.argv[2]
+        end_date = sys.argv[3]
+        run_backtest(start_date, end_date)
+    else:
+        engine = LiveEngine()
+        engine.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log("Shutting down by user...", "STOP")
+            engine.stop()
