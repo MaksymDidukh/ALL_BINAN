@@ -1,0 +1,1160 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Live Trading Bot - Enhanced with Signal-in-Signal Analysis
+Демо-бот с многоуровневым анализом паттернов и детальными отчётами по каждой свече
+"""
+
+import os
+import sys
+import time
+import json
+import sqlite3
+import threading
+import traceback
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional, Tuple
+from collections import deque
+import pandas as pd
+import numpy as np
+import websocket
+
+# Telegram Bot API (python-telegram-bot v20+)
+try:
+    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    from telegram.error import TelegramError
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
+    Update = None
+    ContextTypes = None
+    print("INFO: python-telegram-bot not installed. Bot will work without Telegram commands.")
+    print("      To enable Telegram: pip install python-telegram-bot")
+
+# ========================= CONFIGURATION =========================
+
+# MARKET SETTINGS
+MARKET_SYMBOL = "BTCUSDT"
+TRADE_INTERVAL = "15m"
+
+# CAPITAL & RISK
+INITIAL_CAPITAL = 1000.0
+BASE_POSITION_USD = 10.0
+DEFAULT_LEVERAGE = 30
+FEE_RATE = 0.0004
+
+# TELEGRAM BOT - Замени на свои значения
+TELEGRAM_BOT_TOKEN = "7949835530:AAGBbZewV_4naNU6kph-_xsS5YqE0qqwXzw"
+TELEGRAM_CHAT_ID = "8324602290"
+
+# FUTURES ENDPOINTS
+FUTURES_WS_BASE = "wss://fstream.binance.com/ws"
+
+# PATTERN CONFIGURATION
+PATTERN_CONFIG = {
+    "Bullish Flag": {"tp": 1.0, "sl": 0.25, "scale": 0.1, "confidence": 70},
+    "Bearish Flag": {"tp": 1.0, "sl": 0.25, "scale": 0.1, "confidence": 70},
+    "Ascending Triangle": {"tp": 1.0, "sl": 0.25, "scale": 0.8, "confidence": 80},
+    "Descending Triangle": {"tp": 1.0, "sl": 0.25, "scale": 0.8, "confidence": 80},
+    "Symmetrical Triangle": {"tp": 0.5, "sl": 0.25, "scale": 0.8, "confidence": 65},
+    "Rising Wedge": {"tp": 0.25, "sl": 0.5, "scale": 0.4, "confidence": 75},
+    "Falling Wedge": {"tp": 0.25, "sl": 0.5, "scale": 0.4, "confidence": 75},
+    "FVG Up": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "confidence": 60},
+    "FVG Down": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "confidence": 60},
+    "BOS Up": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "confidence": 85},
+    "BOS Down": {"tp": 0.5, "sl": 0.25, "scale": 0.6, "confidence": 85},
+    "Head & Shoulders": {"tp": 0.75, "sl": 0.5, "scale": 0.8, "confidence": 90},
+    "Double Bottom": {"tp": 0.8, "sl": 0.3, "scale": 0.7, "confidence": 85},
+    "Double Top": {"tp": 0.8, "sl": 0.3, "scale": 0.7, "confidence": 85},
+    "Support Bounce": {"tp": 0.4, "sl": 0.2, "scale": 0.5, "confidence": 70},
+    "Resistance Rejection": {"tp": 0.4, "sl": 0.2, "scale": 0.5, "confidence": 70},
+}
+
+# DATABASE & LOGS
+DB_FILE = f"live_trading_{MARKET_SYMBOL}.db"
+LOG_FILE = "live_trading.log"
+
+# DAILY REPORT TIME (UTC)
+DAILY_REPORT_HOUR = 0
+
+# BUFFER SIZE
+LIVE_BUFFER_SIZE = 500
+
+# SIGNAL-IN-SIGNAL SETTINGS
+ENABLE_NESTED_SIGNALS = True  # Включить анализ вложенных сигналов
+MIN_SIGNAL_CONFIDENCE = 60    # Минимальная уверенность для входа
+CONFLUENCE_BONUS = 15         # Бонус к уверенности при совпадении сигналов
+SEND_CANDLE_REPORT = True     # Отправлять отчёт по каждой новой свече
+
+# ========================= LOGGING =========================
+
+def log(msg: str, level: str = "INFO") -> None:
+    """Записывает сообщение в консоль и в файл лога."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = f"[{ts}] [{level}] {msg}"
+    print(line)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+# ========================= DATABASE =========================
+
+def init_database() -> None:
+    """Создаёт SQLite-базу с расширенными таблицами."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            open_time INTEGER,
+            pattern TEXT,
+            side TEXT,
+            entry_price REAL,
+            size_usd REAL,
+            leverage INTEGER,
+            tp_price REAL,
+            sl_price REAL,
+            status TEXT,
+            close_time INTEGER,
+            close_price REAL,
+            pnl REAL,
+            confidence INTEGER,
+            nested_signals TEXT
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date TEXT PRIMARY KEY,
+            total_trades INTEGER,
+            wins INTEGER,
+            losses INTEGER,
+            total_pnl REAL,
+            capital REAL
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS candle_analysis (
+            timestamp INTEGER PRIMARY KEY,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            patterns TEXT,
+            sentiment TEXT,
+            confidence INTEGER,
+            market_structure TEXT
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+    log("Database initialized", "DB")
+
+def save_position(pos: Dict) -> None:
+    """Сохраняет открытую позицию в БД."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO positions (open_time, pattern, side, entry_price, size_usd, leverage, 
+                               tp_price, sl_price, status, confidence, nested_signals)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (pos["open_time"], pos["pattern"], pos["side"], pos["entry_price"], 
+          pos["size_usd"], pos["leverage"], pos["tp_price"], pos["sl_price"], 
+          "OPEN", pos.get("confidence", 0), json.dumps(pos.get("nested_signals", []))))
+    conn.commit()
+    pos["db_id"] = c.lastrowid
+    conn.close()
+
+def close_position(db_id: int, close_time: int, close_price: float, pnl: float) -> None:
+    """Обновляет запись позиции после закрытия."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        UPDATE positions SET status='CLOSED', close_time=?, close_price=?, pnl=?
+        WHERE id=?
+    """, (close_time, close_price, pnl, db_id))
+    conn.commit()
+    conn.close()
+
+def save_daily_stats(stats: Dict) -> None:
+    """Сохраняет дневную статистику."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO daily_stats (date, total_trades, wins, losses, total_pnl, capital)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (stats["date"], stats["total_trades"], stats["wins"], 
+          stats["losses"], stats["total_pnl"], stats["capital"]))
+    conn.commit()
+    conn.close()
+
+def save_candle_analysis(analysis: Dict) -> None:
+    """Сохраняет анализ свечи в БД."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO candle_analysis 
+        (timestamp, open, high, low, close, volume, patterns, sentiment, confidence, market_structure)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (analysis["timestamp"], analysis["open"], analysis["high"], analysis["low"],
+          analysis["close"], analysis["volume"], json.dumps(analysis["patterns"]),
+          analysis["sentiment"], analysis["confidence"], analysis["market_structure"]))
+    conn.commit()
+    conn.close()
+
+# ========================= TELEGRAM =========================
+
+class TelegramReporter:
+    """Класс для отправки уведомлений в Telegram."""
+    
+    def __init__(self, token: str, chat_id: str):
+        self.enabled = TELEGRAM_AVAILABLE and token and chat_id
+        self.token = token
+        self.chat_id = chat_id
+        self.bot = None
+        
+        if self.enabled:
+            try:
+                self.bot = Bot(token=token)
+                log("Telegram reporter initialized", "TELEGRAM")
+            except Exception as e:
+                log(f"Telegram init error: {e}", "ERROR")
+                self.enabled = False
+        else:
+            if not TELEGRAM_AVAILABLE:
+                log("Telegram reporter disabled (library not installed)", "WARN")
+            else:
+                log("Telegram reporter disabled (missing token/chat_id)", "WARN")
+    
+    async def send_async(self, message: str, reply_markup=None) -> None:
+        """Асинхронная отправка сообщения."""
+        if not self.enabled or not self.bot:
+            return
+        try:
+            max_length = 4000
+            if len(message) <= max_length:
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                parts = [message[i:i+max_length] for i in range(0, len(message), max_length)]
+                for i, part in enumerate(parts):
+                    await self.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=f"[Part {i+1}/{len(parts)}]\n{part}",
+                        parse_mode="HTML"
+                    )
+        except Exception as e:
+            log(f"Telegram send error: {e}", "ERROR")
+    
+    def send(self, message: str, reply_markup=None) -> None:
+        """Синхронный wrapper для отправки."""
+        if not self.enabled:
+            return
+        try:
+            asyncio.run(self.send_async(message, reply_markup))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.send_async(message, reply_markup))
+            else:
+                asyncio.run(self.send_async(message, reply_markup))
+        except Exception as e:
+            log(f"Telegram send wrapper error: {e}", "ERROR")
+
+telegram = TelegramReporter(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+
+# ========================= ENHANCED PATTERN DETECTION =========================
+
+def local_extrema(df: pd.DataFrame, window: int = 5) -> Tuple[List[int], List[int]]:
+    """Находит локальные максимумы и минимумы."""
+    high_max = df['high'].rolling(window, center=True).max()
+    low_min = df['low'].rolling(window, center=True).min()
+    highs = df[df['high'] == high_max].index.tolist()
+    lows = df[df['low'] == low_min].index.tolist()
+    return highs, lows
+
+def detect_flags(df: pd.DataFrame, lookback: int = 20, threshold: float = 0.005) -> List[Dict]:
+    """Обнаруживает флаги с метаданными."""
+    patterns = []
+    for i in range(lookback, len(df)):
+        seg = df['close'].iloc[i-lookback:i]
+        diff = seg.max() - seg.min()
+        if seg.min() <= 0:
+            continue
+        if diff / seg.min() < threshold:
+            slope = (seg.iloc[-1] - seg.iloc[0]) / seg.iloc[0]
+            if slope > 0.0:
+                patterns.append({
+                    "timestamp": seg.index[-1],
+                    "name": "Bullish Flag",
+                    "confidence": 70,
+                    "metadata": {"slope": slope}
+                })
+            elif slope < 0.0:
+                patterns.append({
+                    "timestamp": seg.index[-1],
+                    "name": "Bearish Flag",
+                    "confidence": 70,
+                    "metadata": {"slope": slope}
+                })
+    return patterns
+
+def detect_triangles(df: pd.DataFrame, lookback: int = 24) -> List[Dict]:
+    """Обнаруживает треугольники."""
+    patterns = []
+    for i in range(lookback, len(df)):
+        seg = df.iloc[i-lookback:i]
+        x = np.arange(len(seg))
+        try:
+            high_coef = np.polyfit(x, seg['high'].values, 1)[0]
+            low_coef = np.polyfit(x, seg['low'].values, 1)[0]
+        except Exception:
+            continue
+        
+        if abs(high_coef) < 0.001 and low_coef > 0.0:
+            patterns.append({
+                "timestamp": seg.index[-1],
+                "name": "Ascending Triangle",
+                "confidence": 80,
+                "metadata": {"high_slope": high_coef, "low_slope": low_coef}
+            })
+        elif abs(low_coef) < 0.001 and high_coef < 0.0:
+            patterns.append({
+                "timestamp": seg.index[-1],
+                "name": "Descending Triangle",
+                "confidence": 80,
+                "metadata": {"high_slope": high_coef, "low_slope": low_coef}
+            })
+        elif high_coef < 0 and low_coef > 0:
+            patterns.append({
+                "timestamp": seg.index[-1],
+                "name": "Symmetrical Triangle",
+                "confidence": 65,
+                "metadata": {"high_slope": high_coef, "low_slope": low_coef}
+            })
+    return patterns
+
+def detect_fvg(df: pd.DataFrame, gap_perc: float = 0.002) -> List[Dict]:
+    """Обнаруживает Fair Value Gap."""
+    patterns = []
+    for i in range(2, len(df)):
+        prev_high = df['high'].iloc[i-2]
+        prev_low = df['low'].iloc[i-2]
+        curr_open = df['open'].iloc[i]
+        
+        if curr_open > prev_high * (1 + gap_perc):
+            gap_size = (curr_open - prev_high) / prev_high * 100
+            patterns.append({
+                "timestamp": df.index[i],
+                "name": "FVG Up",
+                "confidence": 60,
+                "metadata": {"gap_size": gap_size}
+            })
+        elif curr_open < prev_low * (1 - gap_perc):
+            gap_size = (prev_low - curr_open) / prev_low * 100
+            patterns.append({
+                "timestamp": df.index[i],
+                "name": "FVG Down",
+                "confidence": 60,
+                "metadata": {"gap_size": gap_size}
+            })
+    return patterns
+
+def detect_bos(df: pd.DataFrame, window: int = 5) -> List[Dict]:
+    """Обнаруживает Break of Structure."""
+    patterns = []
+    highs, lows = local_extrema(df, window)
+    
+    for i in range(1, len(highs)):
+        try:
+            if df.loc[highs[i], 'high'] > df.loc[highs[i-1], 'high']:
+                strength = (df.loc[highs[i], 'high'] - df.loc[highs[i-1], 'high']) / df.loc[highs[i-1], 'high'] * 100
+                patterns.append({
+                    "timestamp": highs[i],
+                    "name": "BOS Up",
+                    "confidence": 85,
+                    "metadata": {"strength": strength}
+                })
+        except Exception:
+            continue
+    
+    for i in range(1, len(lows)):
+        try:
+            if df.loc[lows[i], 'low'] < df.loc[lows[i-1], 'low']:
+                strength = (df.loc[lows[i-1], 'low'] - df.loc[lows[i], 'low']) / df.loc[lows[i-1], 'low'] * 100
+                patterns.append({
+                    "timestamp": lows[i],
+                    "name": "BOS Down",
+                    "confidence": 85,
+                    "metadata": {"strength": strength}
+                })
+        except Exception:
+            continue
+    
+    return patterns
+
+def detect_head_shoulders(df: pd.DataFrame, window: int = 5, threshold: float = 0.01) -> List[Dict]:
+    """Обнаруживает Head & Shoulders."""
+    patterns = []
+    for i in range(window, len(df) - window):
+        left_max = df['high'].iloc[i-window:i].max()
+        head = df['high'].iloc[i]
+        right_max = df['high'].iloc[i+1:i+1+window].max()
+        
+        if head > left_max * (1 + threshold) and head > right_max * (1 + threshold):
+            patterns.append({
+                "timestamp": df.index[i],
+                "name": "Head & Shoulders",
+                "confidence": 90,
+                "metadata": {"head_height": head}
+            })
+    return patterns
+
+def detect_double_patterns(df: pd.DataFrame, window: int = 10, tolerance: float = 0.005) -> List[Dict]:
+    """Обнаруживает Double Top/Bottom."""
+    patterns = []
+    highs, lows = local_extrema(df, window)
+    
+    for i in range(1, len(highs)):
+        try:
+            h1 = df.loc[highs[i-1], 'high']
+            h2 = df.loc[highs[i], 'high']
+            if abs(h1 - h2) / h1 < tolerance:
+                patterns.append({
+                    "timestamp": highs[i],
+                    "name": "Double Top",
+                    "confidence": 85,
+                    "metadata": {"level": h2}
+                })
+        except Exception:
+            continue
+    
+    for i in range(1, len(lows)):
+        try:
+            l1 = df.loc[lows[i-1], 'low']
+            l2 = df.loc[lows[i], 'low']
+            if abs(l1 - l2) / l1 < tolerance:
+                patterns.append({
+                    "timestamp": lows[i],
+                    "name": "Double Bottom",
+                    "confidence": 85,
+                    "metadata": {"level": l2}
+                })
+        except Exception:
+            continue
+    
+    return patterns
+
+def detect_support_resistance(df: pd.DataFrame, window: int = 20) -> List[Dict]:
+    """Обнаруживает уровни поддержки/сопротивления и отскоки."""
+    patterns = []
+    if len(df) < window:
+        return patterns
+    
+    highs, lows = local_extrema(df, 5)
+    last_candle = df.iloc[-1]
+    last_close = last_candle['close']
+    last_low = last_candle['low']
+    last_high = last_candle['high']
+    
+    recent_lows = [df.loc[idx, 'low'] for idx in lows if idx in df.index[-window:]]
+    if len(recent_lows) >= 2:
+        support_level = np.mean(recent_lows)
+        if abs(last_low - support_level) / support_level < 0.01 and last_close > last_low:
+            patterns.append({
+                "timestamp": df.index[-1],
+                "name": "Support Bounce",
+                "confidence": 70,
+                "metadata": {"support_level": support_level}
+            })
+    
+    recent_highs = [df.loc[idx, 'high'] for idx in highs if idx in df.index[-window:]]
+    if len(recent_highs) >= 2:
+        resistance_level = np.mean(recent_highs)
+        if abs(last_high - resistance_level) / resistance_level < 0.01 and last_close < last_high:
+            patterns.append({
+                "timestamp": df.index[-1],
+                "name": "Resistance Rejection",
+                "confidence": 70,
+                "metadata": {"resistance_level": resistance_level}
+            })
+    
+    return patterns
+
+def detect_all_patterns(df: pd.DataFrame) -> List[Dict]:
+    """Запускает все функции обнаружения паттернов."""
+    all_patterns = []
+    try:
+        all_patterns += detect_flags(df)
+        all_patterns += detect_triangles(df)
+        all_patterns += detect_fvg(df)
+        all_patterns += detect_bos(df)
+        all_patterns += detect_head_shoulders(df)
+        all_patterns += detect_double_patterns(df)
+        all_patterns += detect_support_resistance(df)
+    except Exception as e:
+        log(f"Pattern detection error: {e}", "ERROR")
+    
+    return all_patterns
+
+# ========================= SIGNAL-IN-SIGNAL ANALYSIS =========================
+
+def analyze_nested_signals(patterns: List[Dict], current_price: float) -> Dict[str, Any]:
+    """Анализирует вложенные сигналы и вычисляет итоговую уверенность."""
+    if not patterns:
+        return {
+            "main_signal": None,
+            "nested_signals": [],
+            "total_confidence": 0,
+            "signal_direction": "NEUTRAL",
+            "confluence_count": 0
+        }
+    
+    bullish_patterns = []
+    bearish_patterns = []
+    
+    for p in patterns:
+        name = p["name"]
+        if any(x in name for x in ["Bullish", "Ascending", "Up", "Bottom", "Support"]):
+            bullish_patterns.append(p)
+        elif any(x in name for x in ["Bearish", "Descending", "Down", "Top", "Resistance", "Head & Shoulders"]):
+            bearish_patterns.append(p)
+    
+    if len(bullish_patterns) > len(bearish_patterns):
+        main_signal = max(bullish_patterns, key=lambda x: x["confidence"])
+        direction = "LONG"
+        relevant_patterns = bullish_patterns
+    elif len(bearish_patterns) > len(bullish_patterns):
+        main_signal = max(bearish_patterns, key=lambda x: x["confidence"])
+        direction = "SHORT"
+        relevant_patterns = bearish_patterns
+    else:
+        all_sorted = sorted(patterns, key=lambda x: x["confidence"], reverse=True)
+        main_signal = all_sorted[0]
+        direction = "LONG" if any(x in main_signal["name"] for x in ["Bullish", "Up", "Bottom"]) else "SHORT"
+        relevant_patterns = bullish_patterns if direction == "LONG" else bearish_patterns
+    
+    confluence_count = len(relevant_patterns)
+    confluence_bonus = min(confluence_count - 1, 3) * CONFLUENCE_BONUS
+    
+    base_confidence = main_signal["confidence"]
+    total_confidence = min(100, base_confidence + confluence_bonus)
+    
+    return {
+        "main_signal": main_signal,
+        "nested_signals": relevant_patterns,
+        "total_confidence": total_confidence,
+        "signal_direction": direction,
+        "confluence_count": confluence_count,
+        "conflicting_signals": len(bullish_patterns if direction == "SHORT" else bearish_patterns)
+    }
+
+# ========================= MARKET SENTIMENT =========================
+
+def calculate_market_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
+    """Анализирует рыночное настроение."""
+    if len(df) < 20:
+        return {
+            "sentiment": "UNKNOWN",
+            "strength": 0,
+            "description": "Not enough data",
+            "bullish_candles": 0,
+            "bearish_candles": 0,
+            "volatility": 0,
+            "trend": "UNKNOWN"
+        }
+    
+    recent = df.iloc[-20:]
+    bullish_candles = (recent['close'] > recent['open']).sum()
+    bearish_candles = (recent['close'] < recent['open']).sum()
+    
+    ema9 = df['close'].ewm(span=9, adjust=False).mean().iloc[-1]
+    ema21 = df['close'].ewm(span=21, adjust=False).mean().iloc[-1]
+    ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1] if len(df) >= 50 else ema21
+    
+    current_price = df['close'].iloc[-1]
+    volatility = (df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean() / df['close'].iloc[-20:].mean() * 100
+    
+    if current_price > ema9 > ema21 > ema50:
+        trend = "STRONG UPTREND"
+    elif current_price < ema9 < ema21 < ema50:
+        trend = "STRONG DOWNTREND"
+    elif current_price > ema9 and ema9 > ema21:
+        trend = "UPTREND"
+    elif current_price < ema9 and ema9 < ema21:
+        trend = "DOWNTREND"
+    else:
+        trend = "SIDEWAYS"
+    
+    if bullish_candles > bearish_candles * 1.5 and current_price > ema9 > ema21:
+        sentiment = "BULLISH"
+        strength = min(100, int((bullish_candles / 20) * 100))
+        description = "Strong uptrend with momentum"
+    elif bearish_candles > bullish_candles * 1.5 and current_price < ema9 < ema21:
+        sentiment = "BEARISH"
+        strength = min(100, int((bearish_candles / 20) * 100))
+        description = "Strong downtrend with pressure"
+    elif abs(bullish_candles - bearish_candles) <= 3:
+        sentiment = "NEUTRAL"
+        strength = 50
+        description = "Sideways consolidation"
+    else:
+        sentiment = "UNCERTAIN"
+        strength = 60
+        description = "Weak trend or reversal forming"
+    
+    return {
+        "sentiment": sentiment,
+        "strength": strength,
+        "description": description,
+        "bullish_candles": int(bullish_candles),
+        "bearish_candles": int(bearish_candles),
+        "volatility": round(float(volatility), 2),
+        "trend": trend,
+        "ema9": round(float(ema9), 2),
+        "ema21": round(float(ema21), 2)
+    }
+
+def get_market_structure(df: pd.DataFrame) -> str:
+    """Определяет рыночную структуру (Higher Highs/Lower Lows)."""
+    if len(df) < 10:
+        return "UNKNOWN"
+    
+    try:
+        highs, lows = local_extrema(df, 5)
+        
+        if len(highs) >= 2 and len(lows) >= 2:
+            # Получаем последние 2 максимума и минимума
+            recent_high_indices = highs[-2:]
+            recent_low_indices = lows[-2:]
+            
+            # Извлекаем значения как float, а не Series
+            recent_highs = []
+            for h in recent_high_indices:
+                if h in df.index:
+                    val = df.loc[h, 'high']
+                    # Если это Series, берём первое значение
+                    if hasattr(val, 'iloc'):
+                        val = val.iloc[0]
+                    recent_highs.append(float(val))
+            
+            recent_lows = []
+            for l in recent_low_indices:
+                if l in df.index:
+                    val = df.loc[l, 'low']
+                    # Если это Series, берём первое значение
+                    if hasattr(val, 'iloc'):
+                        val = val.iloc[0]
+                    recent_lows.append(float(val))
+            
+            if len(recent_highs) == 2 and len(recent_lows) == 2:
+                if recent_highs[1] > recent_highs[0] and recent_lows[1] > recent_lows[0]:
+                    return "BULLISH (HH/HL)"
+                elif recent_highs[1] < recent_highs[0] and recent_lows[1] < recent_lows[0]:
+                    return "BEARISH (LH/LL)"
+                else:
+                    return "CHOPPY"
+    except Exception as e:
+        log(f"Market structure error: {e}", "WARN")
+    
+    return "CONSOLIDATION"
+
+# ========================= DEMO BROKER =========================
+
+class DemoBroker:
+    """Демо-брокер с управлением позициями."""
+    
+    def __init__(self):
+        self.capital = INITIAL_CAPITAL
+        self.positions: List[Dict] = []
+        self.closed_positions: List[Dict] = []
+        self.lock = threading.Lock()
+    
+    def open_position(self, pattern: str, side: str, entry_price: float, 
+                     tp_price: float, sl_price: float, size_usd: float, 
+                     leverage: int, confidence: int = 0, nested_signals: List = None) -> None:
+        """Открывает демо-позицию."""
+        with self.lock:
+            pos = {
+                "open_time": int(time.time() * 1000),
+                "pattern": pattern,
+                "side": side,
+                "entry_price": entry_price,
+                "size_usd": size_usd,
+                "leverage": leverage,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "qty": (size_usd * leverage) / entry_price,
+                "confidence": confidence,
+                "nested_signals": nested_signals or []
+            }
+            
+            save_position(pos)
+            self.positions.append(pos)
+            
+            log(f"POSITION OPENED: {side} {pattern} @ {entry_price:.2f} | Confidence: {confidence}%", "TRADE")
+            
+            msg = f"🔔 NEW POSITION OPENED\n\n"
+            msg += f"📊 Main Pattern: {pattern}\n"
+            msg += f"{'📈' if side == 'LONG' else '📉'} Side: {side}\n"
+            msg += f"💰 Entry: ${entry_price:.2f}\n"
+            msg += f"🎯 Take Profit: ${tp_price:.2f}\n"
+            msg += f"🛑 Stop Loss: ${sl_price:.2f}\n"
+            msg += f"💵 Size: ${size_usd:.2f} x{leverage}\n"
+            msg += f"🎲 Confidence: {confidence}%\n\n"
+            
+            if nested_signals:
+                msg += f"🔍 Nested Signals ({len(nested_signals)}):\n"
+                for sig in nested_signals[:5]:
+                    msg += f"  • {sig['name']} ({sig['confidence']}%)\n"
+            
+            telegram.send(msg)
+    
+    def check_positions(self, current_price: float) -> None:
+        """Проверяет позиции на TP/SL."""
+        with self.lock:
+            for pos in self.positions[:]:
+                hit_tp = (pos["side"] == "LONG" and current_price >= pos["tp_price"]) or \
+                         (pos["side"] == "SHORT" and current_price <= pos["tp_price"])
+                hit_sl = (pos["side"] == "LONG" and current_price <= pos["sl_price"]) or \
+                         (pos["side"] == "SHORT" and current_price >= pos["sl_price"])
+                
+                if hit_tp or hit_sl:
+                    close_price = pos["tp_price"] if hit_tp else pos["sl_price"]
+                    pnl = self._calculate_pnl(pos, close_price)
+                    close_time = int(time.time() * 1000)
+                    
+                    close_position(pos["db_id"], close_time, close_price, pnl)
+                    self.capital += pnl
+                    self.positions.remove(pos)
+                    self.closed_positions.append({**pos, "close_price": close_price, "pnl": pnl})
+                    
+                    result = "✅ TP HIT" if hit_tp else "❌ SL HIT"
+                    log(f"POSITION CLOSED: {result} {pos['pattern']} @ {close_price:.2f} | PNL: {pnl:.2f}", "TRADE")
+                    
+                    msg = f"{'✅' if hit_tp else '❌'} {result}\n\n"
+                    msg += f"📊 Pattern: {pos['pattern']}\n"
+                    msg += f"Side: {pos['side']}\n"
+                    msg += f"Entry: ${pos['entry_price']:.2f}\n"
+                    msg += f"Exit: ${close_price:.2f}\n"
+                    msg += f"{'💰' if pnl > 0 else '💸'} PNL: ${pnl:+.2f}\n"
+                    msg += f"💵 Capital: ${self.capital:.2f}\n"
+                    msg += f"🎲 Confidence was: {pos['confidence']}%"
+                    
+                    telegram.send(msg)
+    
+    def _calculate_pnl(self, pos: Dict, close_price: float) -> float:
+        """Расчёт PnL с комиссией."""
+        if pos["side"] == "LONG":
+            price_diff = close_price - pos["entry_price"]
+        else:
+            price_diff = pos["entry_price"] - close_price
+        
+        pnl = price_diff * pos["qty"]
+        fee = pos["size_usd"] * pos["leverage"] * FEE_RATE * 2
+        return pnl - fee
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Возвращает статистику."""
+        with self.lock:
+            total = len(self.closed_positions)
+            wins = sum(1 for p in self.closed_positions if p["pnl"] > 0)
+            losses = total - wins
+            total_pnl = sum(p["pnl"] for p in self.closed_positions)
+            
+            return {
+                "capital": self.capital,
+                "total_trades": total,
+                "wins": wins,
+                "losses": losses,
+                "total_pnl": total_pnl,
+                "open_positions": len(self.positions)
+            }
+
+# ========================= CANDLE REPORT GENERATOR =========================
+
+def generate_candle_report(candle: Dict, patterns: List[Dict], sentiment: Dict, 
+                          signal_analysis: Dict, market_structure: str) -> str:
+    """Генерирует ГРАНДИОЗНЫЙ отчёт о новой свече."""
+    
+    sentiment_emoji = {
+        "BULLISH": "🚀",
+        "BEARISH": "🐻",
+        "NEUTRAL": "😐",
+        "UNCERTAIN": "🤔",
+        "UNKNOWN": "❓"
+    }
+    
+    candle_change = ((candle['close'] - candle['open']) / candle['open']) * 100
+    candle_type = "🟢 BULLISH" if candle_change > 0 else "🔴 BEARISH"
+    candle_size = abs(candle_change)
+    
+    if candle_size > 2.0:
+        candle_strength = "⚡ EXPLOSIVE"
+    elif candle_size > 1.0:
+        candle_strength = "💪 STRONG"
+    elif candle_size > 0.5:
+        candle_strength = "📊 MODERATE"
+    else:
+        candle_strength = "😴 WEAK"
+    
+    msg = "═" * 30 + "\n"
+    msg += "🎊 NEW CANDLE EVENT 🎊\n"
+    msg += "═" * 30 + "\n\n"
+    
+    msg += "📊 CANDLE DATA\n"
+    msg += f"⏰ Time: {candle['timestamp'].strftime('%Y-%m-%d %H:%M UTC')}\n"
+    msg += f"📈 Type: {candle_type}\n"
+    msg += f"💪 Strength: {candle_strength}\n"
+    msg += f"🎯 O: ${candle['open']:.2f} | H: ${candle['high']:.2f}\n"
+    msg += f"🎯 L: ${candle['low']:.2f} | C: ${candle['close']:.2f}\n"
+    msg += f"📊 Change: {candle_change:+.2f}%\n"
+    msg += f"📦 Volume: {candle['volume']:.2f}\n\n"
+    
+    msg += "🔮 MARKET SENTIMENT\n"
+    msg += f"{sentiment_emoji.get(sentiment['sentiment'], '❓')} Status: {sentiment['sentiment']}\n"
+    msg += f"💯 Strength: {sentiment['strength']}%\n"
+    msg += f"📝 {sentiment['description']}\n"
+    msg += f"📈 Bullish candles: {sentiment['bullish_candles']}/20\n"
+    msg += f"📉 Bearish candles: {sentiment['bearish_candles']}/20\n"
+    msg += f"🌊 Volatility: {sentiment['volatility']}%\n"
+    msg += f"📊 Trend: {sentiment.get('trend', 'N/A')}\n\n"
+    
+    msg += "🏗️ MARKET STRUCTURE\n"
+    msg += f"📐 Pattern: {market_structure}\n"
+    msg += f"📊 EMA9: ${sentiment.get('ema9', 0):.2f}\n"
+    msg += f"📊 EMA21: ${sentiment.get('ema21', 0):.2f}\n\n"
+    
+    if patterns:
+        msg += f"🎯 DETECTED PATTERNS ({len(patterns)})\n"
+        for i, p in enumerate(patterns[:7], 1):
+            conf_bar = "█" * (p['confidence'] // 10) + "░" * (10 - p['confidence'] // 10)
+            msg += f"{i}. {p['name']}\n"
+            msg += f"   Confidence: {conf_bar} {p['confidence']}%\n"
+        
+        if len(patterns) > 7:
+            msg += f"   ... and {len(patterns) - 7} more patterns\n"
+        msg += "\n"
+    else:
+        msg += "🎯 DETECTED PATTERNS\n"
+        msg += "No patterns detected on this candle\n\n"
+    
+    if signal_analysis['main_signal']:
+        msg += "🔍 SIGNAL-IN-SIGNAL ANALYSIS\n"
+        msg += f"🎯 Main Signal: {signal_analysis['main_signal']['name']}\n"
+        msg += f"📍 Direction: {signal_analysis['signal_direction']}\n"
+        msg += f"💯 Total Confidence: {signal_analysis['total_confidence']}%\n"
+        msg += f"🔗 Confluence: {signal_analysis['confluence_count']} signals aligned\n"
+        
+        if signal_analysis['conflicting_signals'] > 0:
+            msg += f"⚠️ Conflicting signals: {signal_analysis['conflicting_signals']}\n"
+        
+        msg += f"\n🎲 Nested Signals:\n"
+        for sig in signal_analysis['nested_signals'][:5]:
+            msg += f"  • {sig['name']} ({sig['confidence']}%)\n"
+        
+        if signal_analysis['total_confidence'] >= 80:
+            msg += f"\n✅ STRONG SIGNAL - HIGH PROBABILITY TRADE\n"
+        elif signal_analysis['total_confidence'] >= 65:
+            msg += f"\n⚠️ MODERATE SIGNAL - WATCH CLOSELY\n"
+        else:
+            msg += f"\n❌ WEAK SIGNAL - WAIT FOR BETTER SETUP\n"
+        
+        msg += "\n"
+    else:
+        msg += "🔍 SIGNAL-IN-SIGNAL ANALYSIS\n"
+        msg += "No actionable signals detected\n\n"
+    
+    msg += "═" * 30 + "\n"
+    msg += "📊 Live Trading Bot | BTCUSDT\n"
+    msg += "═" * 30
+    
+    return msg
+
+# ========================= LIVE ENGINE =========================
+
+class LiveEngine:
+    """Основной движок бота с полным анализом."""
+    
+    def __init__(self):
+        self.symbol = MARKET_SYMBOL.lower()
+        self.interval = TRADE_INTERVAL
+        self.ws_url = f"{FUTURES_WS_BASE}/{self.symbol}@kline_{self.interval}"
+        self.ws = None
+        self.candle_buffer = deque(maxlen=LIVE_BUFFER_SIZE)
+        self.broker = DemoBroker()
+        self.running = False
+        self.last_report_date = None
+        self.last_patterns: List[Dict] = []
+        self.candle_count = 0
+    
+    def start(self) -> None:
+        """Запускает движок."""
+        self.running = True
+        log("Starting Live Trading Engine with Signal-in-Signal Analysis...", "START")
+        telegram.send("🤖 Live Trading Bot Started\n\n🔍 Signal-in-Signal Analysis: ENABLED\n📊 Candle Reports: ENABLED")
+        
+        ws_thread = threading.Thread(target=self._run_websocket, daemon=True)
+        ws_thread.start()
+        
+        report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
+        report_thread.start()
+    
+    def stop(self) -> None:
+        """Останавливает движок."""
+        self.running = False
+        if self.ws:
+            self.ws.close()
+        log("Live Trading Engine stopped", "STOP")
+    
+    def _run_websocket(self) -> None:
+        """WebSocket цикл."""
+        while self.running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self.ws_url,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                    on_open=self._on_open
+                )
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                log(f"WebSocket error: {e}", "ERROR")
+                time.sleep(5)
+    
+    def _on_open(self, ws) -> None:
+        log("WebSocket connected", "WS")
+    
+    def _on_message(self, ws, message: str) -> None:
+        """Обработка сообщений от Binance."""
+        try:
+            data = json.loads(message)
+            if "k" not in data:
+                return
+            
+            k = data["k"]
+            candle = {
+                "timestamp": pd.to_datetime(k["t"], unit="ms", utc=True),
+                "open": float(k["o"]),
+                "high": float(k["h"]),
+                "low": float(k["l"]),
+                "close": float(k["c"]),
+                "volume": float(k["v"]),
+                "is_closed": k["x"]
+            }
+            
+            self.candle_buffer.append(candle)
+            current_price = candle["close"]
+            
+            self.broker.check_positions(current_price)
+            
+            if candle["is_closed"] and len(self.candle_buffer) >= 50:
+                self.candle_count += 1
+                self._process_closed_candle(candle)
+        
+        except Exception as e:
+            log(f"Message processing error: {e}", "ERROR")
+            traceback.print_exc()
+    
+    def _process_closed_candle(self, candle: Dict) -> None:
+        """Обрабатывает закрытую свечу с полным анализом."""
+        
+        df = pd.DataFrame(list(self.candle_buffer))
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df = df.set_index("timestamp")
+        
+        patterns = detect_all_patterns(df)
+        self.last_patterns = patterns
+        
+        sentiment = calculate_market_sentiment(df)
+        market_structure = get_market_structure(df)
+        
+        current_price = candle['close']
+        signal_analysis = analyze_nested_signals(patterns, current_price)
+        
+        analysis_data = {
+            "timestamp": int(candle['timestamp'].timestamp() * 1000),
+            "open": candle['open'],
+            "high": candle['high'],
+            "low": candle['low'],
+            "close": candle['close'],
+            "volume": candle['volume'],
+            "patterns": [p['name'] for p in patterns],
+            "sentiment": sentiment['sentiment'],
+            "confidence": signal_analysis['total_confidence'],
+            "market_structure": market_structure
+        }
+        save_candle_analysis(analysis_data)
+        
+        if SEND_CANDLE_REPORT:
+            report = generate_candle_report(candle, patterns, sentiment, signal_analysis, market_structure)
+            telegram.send(report)
+            log(f"Candle #{self.candle_count} analyzed - Patterns: {len(patterns)}, Confidence: {signal_analysis['total_confidence']}%", "CANDLE")
+        
+        self._check_entry_conditions(signal_analysis, current_price)
+    
+    def _check_entry_conditions(self, signal_analysis: Dict, current_price: float) -> None:
+        """Проверяет условия для входа в позицию."""
+        
+        if len(self.broker.positions) > 0:
+            log(f"Signal detected but position already open", "SKIP")
+            return
+        
+        if signal_analysis['total_confidence'] < MIN_SIGNAL_CONFIDENCE:
+            log(f"Signal confidence {signal_analysis['total_confidence']}% below minimum {MIN_SIGNAL_CONFIDENCE}%", "SKIP")
+            return
+        
+        if not signal_analysis['main_signal']:
+            return
+        
+        main_pattern = signal_analysis['main_signal']
+        pattern_name = main_pattern['name']
+        
+        cfg = PATTERN_CONFIG.get(pattern_name, {})
+        tp_pct = cfg.get("tp", 0.5)
+        sl_pct = cfg.get("sl", 0.25)
+        scale = cfg.get("scale", 0.5)
+        
+        side = signal_analysis['signal_direction']
+        
+        if side == "LONG":
+            tp_price = current_price * (1 + tp_pct / 100)
+            sl_price = current_price * (1 - sl_pct / 100)
+        else:
+            tp_price = current_price * (1 - tp_pct / 100)
+            sl_price = current_price * (1 + sl_pct / 100)
+        
+        confidence_multiplier = 1 + (signal_analysis['total_confidence'] - 60) / 100
+        size_usd = BASE_POSITION_USD * (1 + scale) * confidence_multiplier
+        size_usd = min(size_usd, BASE_POSITION_USD * 3)
+        
+        self.broker.open_position(
+            pattern=pattern_name,
+            side=side,
+            entry_price=current_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            size_usd=size_usd,
+            leverage=DEFAULT_LEVERAGE,
+            confidence=signal_analysis['total_confidence'],
+            nested_signals=signal_analysis['nested_signals']
+        )
+    
+    def _on_error(self, ws, error) -> None:
+        log(f"WebSocket error: {error}", "ERROR")
+    
+    def _on_close(self, ws, close_status_code, close_msg) -> None:
+        log("WebSocket closed", "WS")
+    
+    def _daily_report_loop(self) -> None:
+        """Цикл ежедневных отчётов."""
+        while self.running:
+            now = datetime.now(timezone.utc)
+            if now.hour == DAILY_REPORT_HOUR and now.date() != self.last_report_date:
+                self._send_daily_report()
+                self.last_report_date = now.date()
+            time.sleep(60)
+    
+    def _send_daily_report(self) -> None:
+        """Отправляет дневной отчёт."""
+        stats = self.broker.get_stats()
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
+        save_daily_stats({
+            "date": date_str,
+            "total_trades": stats["total_trades"],
+            "wins": stats["wins"],
+            "losses": stats["losses"],
+            "total_pnl": stats["total_pnl"],
+            "capital": stats["capital"]
+        })
+        
+        winrate = (stats["wins"] / stats["total_trades"] * 100) if stats["total_trades"] > 0 else 0
+        
+        msg = "═" * 30 + "\n"
+        msg += f"📊 DAILY REPORT - {date_str}\n"
+        msg += "═" * 30 + "\n\n"
+        msg += f"💰 Capital: ${stats['capital']:.2f}\n"
+        msg += f"📈 Total Trades: {stats['total_trades']}\n"
+        msg += f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
+        msg += f"🎯 Win Rate: {winrate:.1f}%\n"
+        msg += f"💵 Total PNL: ${stats['total_pnl']:+.2f}\n"
+        msg += f"📊 Open Positions: {stats['open_positions']}\n"
+        msg += f"🕯️ Candles Analyzed: {self.candle_count}\n\n"
+        msg += "═" * 30
+        
+        log(f"Daily Report: Capital ${stats['capital']:.2f}, PNL ${stats['total_pnl']:.2f}, WR {winrate:.1f}%", "REPORT")
+        telegram.send(msg)
+
+# ========================= ENTRY POINT =========================
+
+engine = None
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 LIVE TRADING BOT - SIGNAL-IN-SIGNAL ANALYSIS")
+    print("=" * 60)
+    print()
+    
+    init_database()
+    
+    engine = LiveEngine()
+    engine.start()
+    
+    log("=" * 50, "START")
+    log("🚀 Live Trading Bot with Signal-in-Signal Analysis", "START")
+    log("=" * 50, "START")
+    log(f"Symbol: {MARKET_SYMBOL}", "CONFIG")
+    log(f"Interval: {TRADE_INTERVAL}", "CONFIG")
+    log(f"Initial Capital: ${INITIAL_CAPITAL}", "CONFIG")
+    log(f"Leverage: {DEFAULT_LEVERAGE}x", "CONFIG")
+    log(f"Min Confidence: {MIN_SIGNAL_CONFIDENCE}%", "CONFIG")
+    log(f"Candle Reports: {'ENABLED' if SEND_CANDLE_REPORT else 'DISABLED'}", "CONFIG")
+    log("=" * 50, "START")
+    
+    print()
+    print("✅ Bot is running!")
+    print()
+    print("⚙️  CONFIGURATION:")
+    print(f"   Symbol: {MARKET_SYMBOL}")
+    print(f"   Interval: {TRADE_INTERVAL}")
+    print(f"   Min Confidence: {MIN_SIGNAL_CONFIDENCE}%")
+    print(f"   Confluence Bonus: +{CONFLUENCE_BONUS}% per signal")
+    print(f"   Candle Reports: {'ON' if SEND_CANDLE_REPORT else 'OFF'}")
+    print()
+    if TELEGRAM_AVAILABLE:
+        print("📱 Telegram: ENABLED (notifications will be sent)")
+    else:
+        print("📱 Telegram: DISABLED (install: pip install python-telegram-bot)")
+    print()
+    print("💡 TIP: To reduce spam, set SEND_CANDLE_REPORT = False")
+    print("         or increase MIN_SIGNAL_CONFIDENCE to 80%")
+    print()
+    print("Press Ctrl+C to stop...")
+    print("=" * 60)
+    print()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print()
+        print("=" * 60)
+        log("Shutting down by user...", "STOP")
+        print("=" * 60)
+        engine.stop()
+        print("✅ Bot stopped successfully!")
+        print()
