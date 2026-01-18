@@ -9,16 +9,16 @@ from collections import defaultdict
 
 # ================= CONFIG =================
 
-# РЕЖИМ РАБОТЫ: 'new_listings' или 'live'
-MODE = "live"  # Измени на "new_listings" для анализа новых монет
+# РЕЖИМ РАБОТЫ: 'new_listings', 'all_coins', 'live'
+MODE = "all_coins"  # Измени на "new_listings" или "live"
 
-# Для режима NEW LISTINGS
+# Для режима NEW LISTINGS и ALL COINS
 START_DATE = "2025-01-01"
 END_DATE   = "2025-12-31"
 
 # Для LIVE режима
-BACKTEST_DAYS = 90  # Сколько дней назад анализировать
-SYMBOL = "BTCUSDT"  # Можно изменить на любую пару
+BACKTEST_DAYS = 90
+SYMBOL = "BTCUSDT"
 
 DAILY_BUY_USD = 10
 TIMEFRAME = "1d"
@@ -98,23 +98,53 @@ def load_day_kline(symbol, date, market="spot"):
     if not os.path.exists(csv_path):
         return None
 
-    df = pd.read_csv(csv_path, header=None)
-    os.remove(csv_path)
+    try:
+        # Пробуем загрузить без заголовков
+        df = pd.read_csv(csv_path, header=None)
+        
+        # Проверяем, не является ли первая строка заголовком
+        if df.iloc[0, 1] == 'open' or isinstance(df.iloc[0, 1], str):
+            # Если да, пропускаем первую строку
+            df = pd.read_csv(csv_path, skiprows=1, header=None)
+        
+        os.remove(csv_path)
 
-    df.columns = [
-        "open_time","open","high","low","close","volume",
-        "close_time","qav","trades","tb","tq","ignore"
-    ]
-    df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
-    return df
+        df.columns = [
+            "open_time","open","high","low","close","volume",
+            "close_time","qav","trades","tb","tq","ignore"
+        ]
+        
+        # Конвертируем в float
+        df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
+        
+        return df
+    except Exception as e:
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        return None
 
 
 def find_first_listing(symbol, market, start, end):
+    """Находит первый день листинга монеты"""
     for day in daterange(start, end):
         df = load_day_kline(symbol, day, market)
         if df is not None:
             return day, df
     return None, None
+
+
+def load_period_data(symbol, market, start, end):
+    """Загружает все данные за период (для старых монет)"""
+    all_data = []
+    for day in daterange(start, end):
+        df = load_day_kline(symbol, day, market)
+        if df is not None:
+            all_data.append(df)
+    
+    if not all_data:
+        return None
+    
+    return pd.concat(all_data, ignore_index=True)
 
 
 def find_max_and_stats(symbol, market, start_day, end):
@@ -149,6 +179,32 @@ def find_max_and_stats(symbol, market, start_day, end):
     }
 
 
+def calculate_all_coins_stats(data, entry_price):
+    """Расчет статистики для режима all_coins"""
+    if data is None or len(data) == 0:
+        return None
+    
+    max_price = data['high'].max()
+    min_price = data['low'].min()
+    current_price = data['close'].iloc[-1]
+    avg_price = data['close'].mean()
+    volatility = data['close'].std()
+    
+    total_volume = data['volume'].sum()
+    avg_volume = data['volume'].mean()
+    
+    return {
+        'max': max_price,
+        'min': min_price,
+        'current': current_price,
+        'avg': avg_price,
+        'volatility': volatility,
+        'total_volume': total_volume,
+        'avg_volume': avg_volume,
+        'days_tracked': len(data)
+    }
+
+
 def calculate_drawdown(entry, min_price):
     if entry > 0:
         return ((min_price - entry) / entry) * 100
@@ -158,6 +214,8 @@ def calculate_drawdown(entry, min_price):
 def print_header(mode):
     if mode == "live":
         title = "LIVE MODE - BACKTEST ANALYSIS"
+    elif mode == "all_coins":
+        title = "ALL COINS DCA STRATEGY"
     else:
         title = "NEW LISTINGS DCA STRATEGY"
     
@@ -182,7 +240,10 @@ def print_config(mode):
         print(f"  🪙 Символ:                {SYMBOL}")
     else:
         print(f"  📅 Период анализа:        {START_DATE} → {END_DATE}")
-        print(f"  🌐 Рынки:                 Spot + Futures")
+        if mode == "all_coins":
+            print(f"  🪙 Стратегия:             $10 в КАЖДУЮ монету на старте периода")
+        else:
+            print(f"  🪙 Стратегия:             $10 в новые монеты при листинге")
     
     print(f"  💵 Инвестиция на монету:  ${DAILY_BUY_USD}")
     print(f"  📈 Таймфрейм:             {TIMEFRAME}")
@@ -228,7 +289,6 @@ def print_live_summary(symbol, data, total_invested, final_value):
     print(f"  ├─ Максимальная просадка:      {max_dd:.2f}%")
     print(f"  └─ Средний объём:              {avg_volume:,.0f}")
     
-    # Торговые дни
     positive_days = len(data[data['close'] > data['open']])
     negative_days = len(data[data['close'] <= data['open']])
     win_rate = (positive_days / len(data)) * 100 if len(data) > 0 else 0
@@ -238,7 +298,6 @@ def print_live_summary(symbol, data, total_invested, final_value):
     print(f"  ├─ Зелёных дней:               {positive_days} ({win_rate:.1f}%)")
     print(f"  └─ Красных дней:               {negative_days} ({100-win_rate:.1f}%)")
     
-    # Оценка
     if roi > 50:
         emoji = "🚀🌙"
         comment = "ОГОНЬ! Отличный результат!"
@@ -253,136 +312,6 @@ def print_live_summary(symbol, data, total_invested, final_value):
         comment = "Diamond hands! Держимся!"
     
     print(f"\n  {emoji} {comment}")
-
-
-def print_live_weekly_breakdown(data):
-    print("\n" + "="*70)
-    print("📅 ПОНЕДЕЛЬНАЯ СТАТИСТИКА")
-    print("="*70)
-    
-    data['week'] = pd.to_datetime(data['open_time'], unit='ms').dt.to_period('W')
-    weekly = data.groupby('week').agg({
-        'open': 'first',
-        'close': 'last',
-        'high': 'max',
-        'low': 'min',
-        'volume': 'sum'
-    })
-    
-    weekly['change_%'] = ((weekly['close'] / weekly['open']) - 1) * 100
-    weekly['range_%'] = ((weekly['high'] - weekly['low']) / weekly['open']) * 100
-    
-    print("\n  Неделя     │  Открытие │  Закрытие │ Изменение │  Диапазон │   Объём")
-    print("  " + "─"*70)
-    
-    for idx, row in weekly.iterrows():
-        change_icon = "📈" if row['change_%'] > 0 else "📉"
-        print(f"  {idx} │ ${row['open']:9,.2f} │ ${row['close']:9,.2f} │ {change_icon} {row['change_%']:+6.2f}% │   {row['range_%']:5.2f}% │ {row['volume']:10,.0f}")
-
-
-def print_live_price_levels(data):
-    print("\n" + "="*70)
-    print("🎯 КЛЮЧЕВЫЕ ЦЕНОВЫЕ УРОВНИ")
-    print("="*70)
-    
-    current = data['close'].iloc[-1]
-    max_price = data['high'].max()
-    min_price = data['low'].min()
-    avg_price = data['close'].mean()
-    
-    # Уровни поддержки и сопротивления (упрощённо)
-    support_1 = data['low'].nsmallest(10).mean()
-    support_2 = data['low'].quantile(0.25)
-    resistance_1 = data['high'].nlargest(10).mean()
-    resistance_2 = data['high'].quantile(0.75)
-    
-    print(f"\n  💎 Текущая цена:          ${current:,.2f}")
-    print(f"  📊 Средняя цена:          ${avg_price:,.2f} ({((current/avg_price-1)*100):+.2f}%)")
-    print(f"\n  🔴 СОПРОТИВЛЕНИЯ:")
-    print(f"     ├─ R2 (сильное):       ${resistance_1:,.2f} ({((resistance_1/current-1)*100):+.2f}%)")
-    print(f"     └─ R1 (слабое):        ${resistance_2:,.2f} ({((resistance_2/current-1)*100):+.2f}%)")
-    print(f"\n  🟢 ПОДДЕРЖКИ:")
-    print(f"     ├─ S1 (слабая):        ${support_2:,.2f} ({((support_2/current-1)*100):+.2f}%)")
-    print(f"     └─ S2 (сильная):       ${support_1:,.2f} ({((support_1/current-1)*100):+.2f}%)")
-    
-    # Процент до уровней
-    to_resistance = ((resistance_1 / current) - 1) * 100
-    to_support = ((support_1 / current) - 1) * 100
-    
-    print(f"\n  📏 Расстояние до сопротивления: {to_resistance:+.2f}%")
-    print(f"  📏 Расстояние до поддержки:     {to_support:.2f}%")
-
-
-def run_live_mode():
-    print_header("live")
-    print_config("live")
-    
-    print("🔄 Загрузка данных для live режима...")
-    ensure_dirs()
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=BACKTEST_DAYS)
-    
-    all_data = []
-    print(f"\n📥 Загрузка {BACKTEST_DAYS} дней данных для {SYMBOL}...\n")
-    
-    total_days = BACKTEST_DAYS
-    loaded = 0
-    
-    for day in daterange(start_date, end_date):
-        loaded += 1
-        progress_bar(loaded, total_days, prefix=f"Загрузка данных")
-        
-        df = load_day_kline(SYMBOL, day, "spot")
-        if df is not None:
-            all_data.append(df)
-    
-    if not all_data:
-        print("\n❌ Не удалось загрузить данные. Проверьте символ и даты.")
-        return
-    
-    data = pd.concat(all_data, ignore_index=True)
-    print(f"\n✅ Загружено {len(data)} свечей")
-    
-    # DCA симуляция
-    total_invested = len(data) * DAILY_BUY_USD
-    entry_price = data['close'].iloc[0]
-    current_price = data['close'].iloc[-1]
-    
-    total_coins = 0
-    for _, row in data.iterrows():
-        total_coins += DAILY_BUY_USD / row['close']
-    
-    final_value = total_coins * current_price
-    
-    print("\n" + "="*70)
-    print("✅ АНАЛИЗ ЗАВЕРШЁН")
-    print("="*70)
-    
-    print_live_summary(SYMBOL, data, total_invested, final_value)
-    print_live_weekly_breakdown(data)
-    print_live_price_levels(data)
-    
-    # Простая статистика движения
-    print("\n" + "="*70)
-    print("📊 ДОПОЛНИТЕЛЬНАЯ СТАТИСТИКА")
-    print("="*70)
-    
-    daily_returns = data['close'].pct_change() * 100
-    
-    print(f"\n  📈 Лучший день:               {daily_returns.max():+.2f}%")
-    print(f"  📉 Худший день:               {daily_returns.min():+.2f}%")
-    print(f"  📊 Средний дневной рост:      {daily_returns.mean():+.2f}%")
-    print(f"  🎲 Медиана дневного роста:    {daily_returns.median():+.2f}%")
-    
-    # Сохранение
-    output_file = f"live_analysis_{SYMBOL}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    data.to_csv(output_file, index=False)
-    print(f"\n💾 Данные сохранены в: {output_file}")
-    
-    print("\n" + "="*70)
-    print("🎉 Спасибо за использование анализатора!")
-    print("="*70 + "\n")
 
 
 def print_market_stats(results_df):
@@ -457,11 +386,28 @@ def print_top_performers(results_df, n=10):
     
     top = results_df.nlargest(n, 'roi_%')
     
-    print("\n  #  │ Символ      │ Рынок   │ Дата листинга │ Вход $  │ Макс $  │   ROI   │ Стоимость")
-    print("  " + "─"*95)
+    print("\n  #  │ Символ      │ Рынок   │ Вход $     │ Текущ $    │   ROI   │ Стоимость")
+    print("  " + "─"*85)
     
     for i, (_, row) in enumerate(top.iterrows(), 1):
-        print(f"  {i:2d} │ {row['symbol']:11s} │ {row['market']:7s} │ {row['listing_date']} │ {row['entry']:7.4f} │ {row['max']:7.2f} │ {row['roi_%']:+7.1f}% │ ${row['final_$']:8.2f}")
+        print(f"  {i:2d} │ {row['symbol']:11s} │ {row['market']:7s} │ ${row['entry']:9.4f} │ ${row['current']:9.2f} │ {row['roi_%']:+7.1f}% │ ${row['final_$']:8.2f}")
+
+
+def print_bottom_performers(results_df, n=10):
+    if results_df.empty:
+        return
+    
+    print("\n" + "="*70)
+    print(f"💀 ТОП-{n} ХУДШИХ МОНЕТ")
+    print("="*70)
+    
+    bottom = results_df.nsmallest(n, 'roi_%')
+    
+    print("\n  #  │ Символ      │ Рынок   │ Вход $     │ Текущ $    │   ROI   │ Стоимость")
+    print("  " + "─"*85)
+    
+    for i, (_, row) in enumerate(bottom.iterrows(), 1):
+        print(f"  {i:2d} │ {row['symbol']:11s} │ {row['market']:7s} │ ${row['entry']:9.4f} │ ${row['current']:9.2f} │ {row['roi_%']:+7.1f}% │ ${row['final_$']:8.2f}")
 
 
 def print_summary(results_df, total_spent, total_final):
@@ -497,22 +443,79 @@ def print_summary(results_df, total_spent, total_final):
     print(f"\n  {emoji} {comment}")
 
 
-def run_new_listings_mode():
-    print_header("new_listings")
-    print_config("new_listings")
+def run_live_mode():
+    print_header("live")
+    print_config("live")
+    
+    print("🔄 Загрузка данных для live режима...")
+    ensure_dirs()
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=BACKTEST_DAYS)
+    
+    all_data = []
+    print(f"\n📥 Загрузка {BACKTEST_DAYS} дней данных для {SYMBOL}...\n")
+    
+    total_days = BACKTEST_DAYS
+    loaded = 0
+    
+    for day in daterange(start_date, end_date):
+        loaded += 1
+        progress_bar(loaded, total_days, prefix=f"Загрузка данных")
+        
+        df = load_day_kline(SYMBOL, day, "spot")
+        if df is not None:
+            all_data.append(df)
+    
+    if not all_data:
+        print("\n❌ Не удалось загрузить данные. Проверьте символ и даты.")
+        return
+    
+    data = pd.concat(all_data, ignore_index=True)
+    print(f"\n✅ Загружено {len(data)} свечей")
+    
+    total_invested = len(data) * DAILY_BUY_USD
+    entry_price = data['close'].iloc[0]
+    current_price = data['close'].iloc[-1]
+    
+    total_coins = 0
+    for _, row in data.iterrows():
+        total_coins += DAILY_BUY_USD / row['close']
+    
+    final_value = total_coins * current_price
+    
+    print("\n" + "="*70)
+    print("✅ АНАЛИЗ ЗАВЕРШЁН")
+    print("="*70)
+    
+    print_live_summary(SYMBOL, data, total_invested, final_value)
+    
+    output_file = f"live_analysis_{SYMBOL}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    data.to_csv(output_file, index=False)
+    print(f"\n💾 Данные сохранены в: {output_file}")
+    
+    print("\n" + "="*70)
+    print("🎉 Спасибо за использование анализатора!")
+    print("="*70 + "\n")
+
+
+def run_all_coins_mode():
+    """Режим: вход по $10 в каждую существующую монету на START_DATE"""
+    print_header("all_coins")
+    print_config("all_coins")
     
     print("🔄 Подготовка директорий...")
     ensure_dirs()
 
     start = datetime.fromisoformat(START_DATE)
-    end   = datetime.fromisoformat(END_DATE)
+    end = datetime.fromisoformat(END_DATE)
 
     print("🌐 Получение списка торговых пар...")
     info = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=20).json()
     symbols = [s["symbol"] for s in info["symbols"] if s["quoteAsset"] == "USDT"]
     
     print(f"✅ Найдено {len(symbols)} USDT пар")
-    print(f"\n🚀 Начинаем анализ...\n")
+    print(f"\n🚀 Начинаем анализ всех монет с {START_DATE}...\n")
 
     total_tasks = len(symbols) * 2
     done = 0
@@ -526,6 +529,100 @@ def run_new_listings_mode():
             done += 1
             progress_bar(done, total_tasks, prefix=f"Анализ {symbol:12s} {market:7s}")
 
+            # Загружаем данные за весь период
+            data = load_period_data(symbol, market, start, end)
+            
+            if data is None or len(data) == 0:
+                continue
+
+            # Цена входа = цена открытия первого дня периода
+            entry = data.iloc[0]["open"]
+            
+            # Текущая цена = цена закрытия последнего дня
+            current = data.iloc[-1]["close"]
+            
+            # Статистика
+            stats = calculate_all_coins_stats(data, entry)
+            
+            if stats is None:
+                continue
+
+            # Расчёт финальной стоимости
+            final = DAILY_BUY_USD * (current / entry) if entry > 0 else DAILY_BUY_USD
+            roi = ((current / entry) - 1) * 100 if entry > 0 else 0
+            max_dd = calculate_drawdown(entry, stats['min'])
+            volatility_pct = (stats['volatility'] / entry * 100) if entry > 0 else 0
+
+            total_spent += DAILY_BUY_USD
+            total_final += final
+
+            results.append({
+                "symbol": symbol,
+                "market": market,
+                "entry": round(entry, 6),
+                "current": round(current, 6),
+                "max": round(stats['max'], 6),
+                "min": round(stats['min'], 6),
+                "final_$": round(final, 2),
+                "roi_%": round(roi, 2),
+                "max_drawdown_%": round(max_dd, 2),
+                "volatility_%": round(volatility_pct, 2),
+                "days_tracked": stats['days_tracked'],
+                "avg_volume": round(stats['avg_volume'], 2)
+            })
+
+    df = pd.DataFrame(results).sort_values("roi_%", ascending=False)
+
+    print("\n" + "="*70)
+    print("✅ АНАЛИЗ ЗАВЕРШЁН")
+    print("="*70)
+    
+    print_market_stats(df)
+    print_performance_tiers(df)
+    print_top_performers(df, 15)
+    print_bottom_performers(df, 10)
+    print_summary(df, total_spent, total_final)
+    
+    output_file = f"all_coins_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    df.to_csv(output_file, index=False)
+    print(f"\n💾 Результаты сохранены в: {output_file}")
+    
+    print("\n" + "="*70)
+    print("🎉 Спасибо за использование анализатора!")
+    print("="*70 + "\n")
+
+
+def run_new_listings_mode():
+    """Режим: вход только в новые монеты при их листинге"""
+    print_header("new_listings")
+    print_config("new_listings")
+    
+    print("🔄 Подготовка директорий...")
+    ensure_dirs()
+
+    start = datetime.fromisoformat(START_DATE)
+    end = datetime.fromisoformat(END_DATE)
+
+    print("🌐 Получение списка торговых пар...")
+    info = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=20).json()
+    symbols = [s["symbol"] for s in info["symbols"] if s["quoteAsset"] == "USDT"]
+    
+    print(f"✅ Найдено {len(symbols)} USDT пар")
+    print(f"\n🚀 Начинаем анализ новых листингов...\n")
+
+    total_tasks = len(symbols) * 2
+    done = 0
+
+    total_spent = 0
+    total_final = 0
+    results = []
+
+    for symbol in symbols:
+        for market in ["spot", "futures"]:
+            done += 1
+            progress_bar(done, total_tasks, prefix=f"Анализ {symbol:12s} {market:7s}")
+
+            # Ищем первый день листинга
             first_day, first_df = find_first_listing(symbol, market, start, end)
             if first_df is None:
                 continue
@@ -549,6 +646,7 @@ def run_new_listings_mode():
                 "market": market,
                 "listing_date": first_day.date(),
                 "entry": round(entry, 6),
+                "current": round(stats['max'], 6),
                 "max": round(maxp, 6),
                 "min": round(minp, 6),
                 "final_$": round(final, 2),
@@ -568,6 +666,7 @@ def run_new_listings_mode():
     print_market_stats(df)
     print_performance_tiers(df)
     print_top_performers(df, 15)
+    print_bottom_performers(df, 10)
     print_summary(df, total_spent, total_final)
     
     output_file = f"new_listings_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -582,11 +681,13 @@ def run_new_listings_mode():
 def main():
     if MODE == "live":
         run_live_mode()
+    elif MODE == "all_coins":
+        run_all_coins_mode()
     elif MODE == "new_listings":
         run_new_listings_mode()
     else:
         print(f"❌ Неизвестный режим: {MODE}")
-        print("Установите MODE = 'live' или MODE = 'new_listings'")
+        print("Установите MODE = 'live', 'all_coins' или 'new_listings'")
 
 
 if __name__ == "__main__":
