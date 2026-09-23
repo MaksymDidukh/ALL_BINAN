@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Analytics & Pattern Backtester</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        binanceDark: '#12161C',
+                        binanceCard: '#1E2329',
+                        binanceBorder: '#2B313A',
+                        binanceYellow: '#F0B90B',
+                        binanceGreen: '#0ECB81',
+                        binanceRed: '#E65365',
+                        binanceHover: '#2B313A'
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- TradingView Lightweight Charts Library -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        /* Custom scrollbars for trading aesthetic */
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #12161C;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2B313A;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #474D57;
+        }
+        .tab-active {
+            border-bottom: 2px solid #F0B90B;
+            color: #F0B90B !important;
+        }
+        /* Interactive Pattern Tooltip */
+        #patternTooltip {
+            pointer-events: none;
+            transition: opacity 0.15s ease-in-out;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.7);
+        }
+    </style>
+</head>
+<body class="bg-binanceDark text-gray-200 font-sans antialiased h-screen flex flex-col overflow-hidden">
+
+    <!-- Top Navigation Header -->
+    <header class="bg-binanceCard border-b border-binanceBorder px-4 py-2.5 flex items-center justify-between shrink-0">
+        <div class="flex items-center space-x-6">
+            <div class="flex items-center space-x-2">
+                <i class="fa-solid fa-chart-line text-binanceYellow text-2xl"></i>
+                <span class="font-bold text-lg text-white tracking-wide">Apex<span class="text-binanceYellow">Patterns Pro</span></span>
+                <span class="text-xs bg-binanceYellow/20 text-binanceYellow px-2 py-0.5 rounded border border-binanceYellow/30 font-mono">Binance Futures</span>
+            </div>
+            
+            <!-- Symbol Selector -->
+            <div class="flex items-center space-x-2 border-l border-binanceBorder pl-6">
+                <label for="symbolSelect" class="text-xs text-gray-400 font-semibold uppercase">Pair:</label>
+                <select id="symbolSelect" class="bg-binanceDark border border-binanceBorder text-white text-sm rounded px-3 py-1.5 focus:outline-none focus:border-binanceYellow transition">
+                    <option value="BTCUSDT" selected>BTC/USDT</option>
+                    <option value="ETHUSDT">ETH/USDT</option>
+                    <option value="SOLUSDT">SOL/USDT</option>
+                    <option value="BNBUSDT">BNB/USDT</option>
+                    <option value="XRPUSDT">XRP/USDT</option>
+                    <option value="ADAUSDT">ADA/USDT</option>
+                </select>
+            </div>
+
+            <!-- Timeframe Selector -->
+            <div class="flex items-center space-x-1 border-l border-binanceBorder pl-6" id="timeframeContainer">
+                <button data-tf="1m" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400">1m</button>
+                <button data-tf="5m" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400">5m</button>
+                <button data-tf="15m" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400">15m</button>
+                <button data-tf="1h" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover bg-binanceBorder text-binanceYellow font-bold">1h</button>
+                <button data-tf="4h" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400">4h</button>
+                <button data-tf="1d" class="tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400">1d</button>
+            </div>
+        </div>
+
+        <!-- Live Price Ticker Stats -->
+        <div class="flex items-center space-x-6 text-sm">
+            <div>
+                <span class="text-xs text-gray-400 block">Mark Price</span>
+                <span id="tickerPrice" class="font-mono font-bold text-lg text-binanceGreen">---.--</span>
+            </div>
+            <div>
+                <span class="text-xs text-gray-400 block">24h Change</span>
+                <span id="tickerChange" class="font-mono font-semibold text-binanceGreen">--.--%</span>
+            </div>
+            <div>
+                <span class="text-xs text-gray-400 block">24h High</span>
+                <span id="tickerHigh" class="font-mono text-gray-200">---.--</span>
+            </div>
+            <div>
+                <span class="text-xs text-gray-400 block">24h Low</span>
+                <span id="tickerLow" class="font-mono text-gray-200">---.--</span>
+            </div>
+            <div>
+                <span class="text-xs text-gray-400 block">24h Volume</span>
+                <span id="tickerVolume" class="font-mono text-gray-200">---.--</span>
+            </div>
+            <div class="flex items-center pl-4 border-l border-binanceBorder">
+                <span id="wsStatus" class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 animate-pulse" title="WebSocket Status"></span>
+                <span id="wsStatusText" class="text-xs text-gray-400">Connecting...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <div class="flex-1 flex overflow-hidden">
+        
+        <!-- Left Sidebar: Controls & Pattern Toggles -->
+        <aside class="w-80 bg-binanceCard border-r border-binanceBorder flex flex-col shrink-0 overflow-y-auto">
+            
+            <!-- Sidebar Navigation Tabs -->
+            <div class="flex border-b border-binanceBorder text-xs font-semibold text-gray-400">
+                <button id="tabPatternsBtn" class="flex-1 py-3 text-center tab-active hover:text-white transition" onclick="switchSidebarTab('patterns')">
+                    <i class="fa-solid fa-shapes mr-1.5"></i> Patterns
+                </button>
+                <button id="tabBacktestBtn" class="flex-1 py-3 text-center hover:text-white transition" onclick="switchSidebarTab('backtest')">
+                    <i class="fa-solid fa-flask mr-1.5"></i> Backtest
+                </button>
+            </div>
+
+            <!-- Tab 1: Pattern Controls & Scanner -->
+            <div id="tabPatterns" class="p-4 space-y-6 flex-1">
+                <!-- Master Toggle -->
+                <div class="flex items-center justify-between bg-binanceDark p-3 rounded border border-binanceBorder">
+                    <div class="flex items-center space-x-2">
+                        <i class="fa-solid fa-eye text-binanceYellow"></i>
+                        <span class="text-sm font-semibold">Overlay Markers</span>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggleMarkers" class="sr-only peer" checked>
+                        <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-binanceYellow"></div>
+                    </label>
+                </div>
+
+                <!-- Candlestick Patterns Toggle Group -->
+                <div>
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between">
+                        <span>Candlestick Patterns</span>
+                        <button onclick="toggleGroup('candle', true)" class="text-[10px] text-binanceYellow hover:underline">All</button>
+                    </h3>
+                    <div class="space-y-2 text-xs">
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-circle text-[8px] text-yellow-400 mr-2"></i> Doji</span>
+                            <input type="checkbox" data-pattern="doji" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-circle text-[8px] text-emerald-400 mr-2"></i> Hammer / Hanging Man</span>
+                            <input type="checkbox" data-pattern="hammer" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-circle text-[8px] text-blue-400 mr-2"></i> Bullish / Bearish Engulfing</span>
+                            <input type="checkbox" data-pattern="engulfing" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-circle text-[8px] text-purple-400 mr-2"></i> Morning / Evening Star</span>
+                            <input type="checkbox" data-pattern="star" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Graphical/Chart Patterns Toggle Group -->
+                <div>
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between">
+                        <span>Graphical Patterns</span>
+                        <button onclick="toggleGroup('chart', true)" class="text-[10px] text-binanceYellow hover:underline">All</button>
+                    </h3>
+                    <div class="space-y-2 text-xs">
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-draw-polygon text-binanceYellow mr-2"></i> Head & Shoulders</span>
+                            <input type="checkbox" data-pattern="headAndShoulders" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-play text-cyan-400 mr-2"></i> Triangles (Asc/Desc/Sym)</span>
+                            <input type="checkbox" data-pattern="triangles" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-flag text-pink-400 mr-2"></i> Bullish / Bearish Flag</span>
+                            <input type="checkbox" data-pattern="flags" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                        <label class="flex items-center justify-between bg-binanceDark/50 p-2 rounded border border-binanceBorder/50 hover:border-binanceBorder cursor-pointer">
+                            <span class="flex items-center"><i class="fa-solid fa-shield-halved text-orange-400 mr-2"></i> Double Top / Bottom</span>
+                            <input type="checkbox" data-pattern="doubleTopBottom" class="pattern-checkbox rounded bg-binanceDark border-binanceBorder text-binanceYellow focus:ring-0" checked>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Detected Patterns Feed -->
+                <div>
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Detected Signals Feed</h3>
+                    <div id="detectedFeed" class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                        <div class="text-xs text-gray-500 italic text-center py-4">Scanning chart data...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Strategy Backtester Module -->
+            <div id="tabBacktest" class="p-4 space-y-5 hidden flex-1">
+                <div>
+                    <label class="text-xs font-semibold text-gray-400 block mb-1">Target Pattern Strategy</label>
+                    <select id="backtestPattern" class="w-full bg-binanceDark border border-binanceBorder text-xs text-white rounded p-2 focus:outline-none focus:border-binanceYellow">
+                        <option value="engulfing">Bullish/Bearish Engulfing</option>
+                        <option value="hammer">Hammer / Hanging Man</option>
+                        <option value="star">Morning / Evening Star</option>
+                        <option value="headAndShoulders">Head & Shoulders</option>
+                        <option value="triangles">Triangles Breakout</option>
+                        <option value="flags">Flags / Pennants</option>
+                        <option value="doubleTopBottom">Double Top / Bottom</option>
+                    </select>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-[11px] font-semibold text-gray-400 block mb-1">Take Profit Ratio</label>
+                        <div class="relative">
+                            <input type="number" id="tpRatio" value="1.5" step="0.1" class="w-full bg-binanceDark border border-binanceBorder text-xs text-white rounded p-2 pr-6 focus:outline-none focus:border-binanceYellow">
+                            <span class="absolute right-2 top-2 text-[10px] text-gray-500">R:R</span>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="text-[11px] font-semibold text-gray-400 block mb-1">Stop Loss (% ATR)</label>
+                        <div class="relative">
+                            <input type="number" id="slMult" value="1.0" step="0.1" class="w-full bg-binanceDark border border-binanceBorder text-xs text-white rounded p-2 pr-6 focus:outline-none focus:border-binanceYellow">
+                            <span class="absolute right-2 top-2 text-[10px] text-gray-500">x</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="text-[11px] font-semibold text-gray-400 block mb-1">Historical Candle Window</label>
+                    <select id="backtestCandleLimit" class="w-full bg-binanceDark border border-binanceBorder text-xs text-white rounded p-2 focus:outline-none focus:border-binanceYellow">
+                        <option value="500">500 Bars</option>
+                        <option value="1000" selected>1,000 Bars</option>
+                        <option value="1500">1,500 Bars</option>
+                    </select>
+                </div>
+
+                <button id="runBacktestBtn" onclick="runBacktest()" class="w-full bg-binanceYellow hover:bg-yellow-500 text-binanceDark font-bold py-2.5 rounded transition shadow flex items-center justify-center space-x-2 text-xs">
+                    <i class="fa-solid fa-play"></i>
+                    <span>Execute Strategy Backtest</span>
+                </button>
+
+                <!-- Backtest Results Display -->
+                <div id="backtestResults" class="space-y-3 pt-2 border-t border-binanceBorder">
+                    <div class="text-xs font-bold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+                        <span>Performance Summary</span>
+                        <span id="btStatus" class="text-[10px] text-gray-500">Ready</span>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2 text-center">
+                        <div class="bg-binanceDark p-2.5 rounded border border-binanceBorder">
+                            <div class="text-[10px] text-gray-400 uppercase">Win Rate</div>
+                            <div id="btWinRate" class="text-lg font-mono font-bold text-binanceGreen">0.0%</div>
+                        </div>
+                        <div class="bg-binanceDark p-2.5 rounded border border-binanceBorder">
+                            <div class="text-[10px] text-gray-400 uppercase">Total Trades</div>
+                            <div id="btTrades" class="text-lg font-mono font-bold text-white">0</div>
+                        </div>
+                        <div class="bg-binanceDark p-2.5 rounded border border-binanceBorder">
+                            <div class="text-[10px] text-gray-400 uppercase">Profit Factor</div>
+                            <div id="btProfitFactor" class="text-lg font-mono font-bold text-yellow-400">0.00</div>
+                        </div>
+                        <div class="bg-binanceDark p-2.5 rounded border border-binanceBorder">
+                            <div class="text-[10px] text-gray-400 uppercase">Net Return</div>
+                            <div id="btNetReturn" class="text-lg font-mono font-bold text-gray-300">0.00%</div>
+                        </div>
+                    </div>
+
+                    <div class="bg-binanceDark p-3 rounded border border-binanceBorder text-xs space-y-1.5 font-mono">
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Winning Trades:</span>
+                            <span id="btWins" class="text-binanceGreen font-bold">0</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Losing Trades:</span>
+                            <span id="btLosses" class="text-binanceRed font-bold">0</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Max Drawdown:</span>
+                            <span id="btMaxDD" class="text-binanceRed font-bold">0.00%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Center Chart Display Section -->
+        <main class="flex-1 flex flex-col bg-binanceDark relative overflow-hidden">
+            
+            <!-- Chart Floating Toolbar & Information Overlay -->
+            <div class="absolute top-3 left-3 z-10 flex items-center space-x-3 bg-binanceCard/90 backdrop-blur px-3 py-1.5 rounded border border-binanceBorder text-xs">
+                <span id="chartSymbolDisplay" class="font-bold text-white tracking-wide">BTC/USDT</span>
+                <span id="chartTfDisplay" class="text-binanceYellow font-semibold">1h</span>
+                <span id="chartOHLC" class="text-gray-400 font-mono hidden md:inline-block">O: -- H: -- L: -- C: --</span>
+            </div>
+
+            <!-- Dynamic On-Chart Hover Tooltip for Patterns -->
+            <div id="patternTooltip" class="absolute z-30 hidden bg-binanceCard/95 border border-binanceYellow p-3 rounded-md text-xs text-white max-w-xs shadow-2xl backdrop-blur-md">
+                <div class="flex items-center justify-between border-b border-binanceBorder pb-1.5 mb-2">
+                    <span id="ttTitle" class="font-bold text-binanceYellow text-sm">Pattern Name</span>
+                    <span id="ttOutcome" class="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold bg-gray-700">RESULT</span>
+                </div>
+                <div class="space-y-1 font-mono text-[11px]">
+                    <div class="flex justify-between"><span class="text-gray-400">Signal Time:</span><span id="ttTime" class="text-gray-200">--:--</span></div>
+                    <div class="flex justify-between"><span class="text-gray-400">Pattern Stat WR:</span><span id="ttWinRate" class="text-binanceGreen font-bold">--%</span></div>
+                    <div class="flex justify-between"><span class="text-gray-400">Entry Price:</span><span id="ttEntry" class="text-white font-semibold">0.00</span></div>
+                    <div class="flex justify-between"><span class="text-gray-400">Stop Loss:</span><span id="ttSL" class="text-binanceRed">0.00</span></div>
+                    <div class="flex justify-between"><span class="text-gray-400">Take Profit:</span><span id="ttTP" class="text-binanceGreen">0.00</span></div>
+                </div>
+            </div>
+
+            <!-- Main Chart Canvas -->
+            <div id="chartContainer" class="w-full flex-1 relative"></div>
+
+            <!-- Pattern Win Rate Statistics Bottom Panel -->
+            <div id="patternStatsBottomPanel" class="bg-binanceCard border-t border-binanceBorder p-3 shrink-0">
+                <div class="flex items-center justify-between mb-2">
+                    <div class="flex items-center space-x-2">
+                        <i class="fa-solid fa-chart-pie text-binanceYellow text-xs"></i>
+                        <span class="text-xs font-bold text-white uppercase tracking-wider">Pattern Performance Statistics</span>
+                        <span class="text-[10px] text-gray-400">(Calculated on current dataset & settings)</span>
+                    </div>
+                    <div class="text-[11px] text-gray-400 flex items-center space-x-3">
+                        <span><span class="inline-block w-2 h-2 rounded-full bg-binanceGreen mr-1"></span>Win Rate &gt; 50%</span>
+                        <span><span class="inline-block w-2 h-2 rounded-full bg-binanceRed mr-1"></span>Win Rate &le; 50%</span>
+                    </div>
+                </div>
+                
+                <div id="patternStatsGrid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
+                    <!-- Dynamic stat cards for each pattern will be injected here -->
+                    <div class="text-xs text-gray-500 italic col-span-full text-center py-2">Analyzing pattern win rates...</div>
+                </div>
+            </div>
+
+            <!-- Bottom Status Indicator Bar -->
+            <div class="bg-binanceCard border-t border-binanceBorder px-4 py-1.5 flex items-center justify-between text-xs text-gray-400 shrink-0">
+                <div class="flex items-center space-x-4">
+                    <span><i class="fa-solid fa-server text-binanceYellow mr-1"></i> Data Source: Binance API</span>
+                    <span id="dataPointCount"><i class="fa-solid fa-bars-staggered mr-1"></i> Bars Loaded: 0</span>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <span id="lastUpdated">Last Update: --:--:--</span>
+                    <span class="bg-binanceGreen/20 text-binanceGreen text-[10px] px-2 py-0.5 rounded font-mono">LIVE API</span>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Global Application State
+        const state = {
+            symbol: 'BTCUSDT',
+            timeframe: '1h',
+            klines: [], // Array of { time, open, high, low, close, volume }
+            ws: null,
+            chart: null,
+            candlestickSeries: null,
+            volumeSeries: null,
+            patternLinesSeries: [],
+            markersMap: new Map(), // time -> marker detail object for hover tooltips
+            detectedPatternsList: [], // stored pattern instances with outcome evaluations
+            patternGlobalStats: {}, // statistics grouped by pattern type
+            activeTab: 'patterns'
+        };
+
+        function initChart() {
+            const container = document.getElementById('chartContainer');
+            container.innerHTML = ''; // Clear container
+
+            state.chart = LightweightCharts.createChart(container, {
+                width: container.clientWidth,
+                height: container.clientHeight,
+                layout: {
+                    background: { type: 'solid', color: '#12161C' },
+                    textColor: '#848E9C',
+                    fontSize: 12,
+                    fontFamily: 'Inter, sans-serif'
+                },
+                grid: {
+                    vertLines: { color: 'rgba(43, 49, 58, 0.4)' },
+                    horzLines: { color: 'rgba(43, 49, 58, 0.4)' }
+                },
+                crosshair: {
+                    mode: LightweightCharts.CrosshairMode.Normal,
+                    vertLine: {
+                        color: '#758696',
+                        width: 1,
+                        style: LightweightCharts.LineStyle.Dashed,
+                        labelBackgroundColor: '#2B313A',
+                    },
+                    horzLine: {
+                        color: '#758696',
+                        width: 1,
+                        style: LightweightCharts.LineStyle.Dashed,
+                        labelBackgroundColor: '#2B313A',
+                    },
+                },
+                rightPriceScale: {
+                    borderColor: '#2B313A',
+                    scaleMargins: {
+                        top: 0.1,
+                        bottom: 0.2,
+                    },
+                },
+                timeScale: {
+                    borderColor: '#2B313A',
+                    timeVisible: true,
+                    secondsVisible: false,
+                },
+            });
+
+            // Add Candlestick Series
+            state.candlestickSeries = state.chart.addCandlestickSeries({
+                upColor: '#0ECB81',
+                downColor: '#E65365',
+                borderVisible: false,
+                wickUpColor: '#0ECB81',
+                wickDownColor: '#E65365'
+            });
+
+            // Add Volume Histogram Series
+            state.volumeSeries = state.chart.addHistogramSeries({
+                color: '#26a69a',
+                priceFormat: { type: 'volume' },
+                priceScaleId: '',
+                scaleMargins: {
+                    top: 0.8,
+                    bottom: 0,
+                },
+            });
+
+            // Crosshair move listener for OHLC top bar and Pattern Tooltip Hovering
+            state.chart.subscribeCrosshairMove(param => {
+                const tooltip = document.getElementById('patternTooltip');
+
+                if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
+                    tooltip.classList.add('hidden');
+                    if (state.klines.length > 0) {
+                        const last = state.klines[state.klines.length - 1];
+                        updateOHLCDisplay(last.open, last.high, last.low, last.close);
+                    }
+                    return;
+                }
+
+                // Update OHLC Bar
+                const data = param.seriesPrices.get(state.candlestickSeries);
+                if (data) {
+                    updateOHLCDisplay(data.open, data.high, data.low, data.close);
+                }
+
+                // Check for hover over pattern marker
+                const timeSec = typeof param.time === 'object' ? param.time.timestamp : param.time;
+                const patternInfo = state.markersMap.get(timeSec);
+
+                if (patternInfo) {
+                    document.getElementById('ttTitle').innerText = patternInfo.type;
+                    document.getElementById('ttTime').innerText = new Date(patternInfo.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    
+                    const stat = state.patternGlobalStats[patternInfo.type] || { winRate: 0 };
+                    document.getElementById('ttWinRate').innerText = `${stat.winRate.toFixed(1)}%`;
+                    
+                    document.getElementById('ttEntry').innerText = patternInfo.entryPrice ? patternInfo.entryPrice.toFixed(2) : '--';
+                    document.getElementById('ttSL').innerText = patternInfo.slPrice ? patternInfo.slPrice.toFixed(2) : '--';
+                    document.getElementById('ttTP').innerText = patternInfo.tpPrice ? patternInfo.tpPrice.toFixed(2) : '--';
+
+                    const outcomeEl = document.getElementById('ttOutcome');
+                    if (patternInfo.outcome === 'WIN') {
+                        outcomeEl.innerText = 'WIN';
+                        outcomeEl.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-binanceGreen/20 text-binanceGreen border border-binanceGreen/40';
+                    } else if (patternInfo.outcome === 'LOSS') {
+                        outcomeEl.innerText = 'LOSS';
+                        outcomeEl.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-binanceRed/20 text-binanceRed border border-binanceRed/40';
+                    } else {
+                        outcomeEl.innerText = 'PENDING';
+                        outcomeEl.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-yellow-500/20 text-yellow-400 border border-yellow-500/40';
+                    }
+
+                    // Position Tooltip
+                    const containerRect = container.getBoundingClientRect();
+                    let left = param.point.x + 15;
+                    let top = param.point.y + 15;
+
+                    if (left + 220 > containerRect.width) left = param.point.x - 220;
+                    if (top + 160 > containerRect.height) top = param.point.y - 160;
+
+                    tooltip.style.left = `${left}px`;
+                    tooltip.style.top = `${top}px`;
+                    tooltip.classList.remove('hidden');
+                } else {
+                    tooltip.classList.add('hidden');
+                }
+            });
+
+            // Handle Resize
+            window.addEventListener('resize', () => {
+                if (state.chart) {
+                    state.chart.applyOptions({
+                        width: container.clientWidth,
+                        height: container.clientHeight
+                    });
+                }
+            });
+        }
+
+        function updateOHLCDisplay(open, high, low, close) {
+            document.getElementById('chartOHLC').innerText = 
+                `O: ${open.toFixed(2)}  H: ${high.toFixed(2)}  L: ${low.toFixed(2)}  C: ${close.toFixed(2)}`;
+        }
+
+        async function fetchHistoricalKlines(symbol, timeframe, limit = 1000) {
+            try {
+                const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${timeframe}&limit=${limit}`);
+                const data = await response.json();
+                
+                const formatted = data.map(d => ({
+                    time: Math.floor(d[0] / 1000), // UNIX timestamp in seconds
+                    open: parseFloat(d[1]),
+                    high: parseFloat(d[2]),
+                    low: parseFloat(d[3]),
+                    close: parseFloat(d[4]),
+                    volume: parseFloat(d[5])
+                }));
+
+                state.klines = formatted;
+                
+                // Set chart data
+                const candleData = formatted.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close }));
+                const volumeData = formatted.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(14, 203, 129, 0.3)' : 'rgba(230, 83, 101, 0.3)'
+                }));
+
+                state.candlestickSeries.setData(candleData);
+                state.volumeSeries.setData(volumeData);
+                state.chart.timeScale().fitContent();
+
+                document.getElementById('dataPointCount').innerText = `Bars Loaded: ${formatted.length}`;
+                
+                // Trigger Pattern Analysis
+                runPatternDetection();
+            } catch (error) {
+                console.error("Failed to fetch kline data from Binance API:", error);
+            }
+        }
+
+        function connectWebSocket(symbol, timeframe) {
+            if (state.ws) {
+                state.ws.close();
+            }
+
+            const streamName = `${symbol.toLowerCase()}@kline_${timeframe}`;
+            const wsUrl = `wss://fstream.binance.com/ws/${streamName}`;
+            
+            updateWSStatus(false, 'Connecting...');
+            state.ws = new WebSocket(wsUrl);
+
+            state.ws.onopen = () => {
+                updateWSStatus(true, 'Connected');
+            };
+
+            state.ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                if (message.e === 'kline') {
+                    const k = message.k;
+                    const candle = {
+                        time: Math.floor(k.t / 1000),
+                        open: parseFloat(k.o),
+                        high: parseFloat(k.h),
+                        low: parseFloat(k.l),
+                        close: parseFloat(k.c),
+                        volume: parseFloat(k.v)
+                    };
+
+                    // Update ticker stats bar
+                    updateTickerBar(candle, k);
+
+                    // Update or push candle in local array
+                    const lastIdx = state.klines.length - 1;
+                    if (lastIdx >= 0 && state.klines[lastIdx].time === candle.time) {
+                        state.klines[lastIdx] = candle;
+                    } else {
+                        state.klines.push(candle);
+                        if (state.klines.length > 1500) state.klines.shift();
+                    }
+
+                    // Update lightweight charts real-time candle & volume
+                    state.candlestickSeries.update({
+                        time: candle.time,
+                        open: candle.open,
+                        high: candle.high,
+                        low: candle.low,
+                        close: candle.close
+                    });
+
+                    state.volumeSeries.update({
+                        time: candle.time,
+                        value: candle.volume,
+                        color: candle.close >= candle.open ? 'rgba(14, 203, 129, 0.3)' : 'rgba(230, 83, 101, 0.3)'
+                    });
+
+                    document.getElementById('lastUpdated').innerText = `Last Update: ${new Date().toLocaleTimeString()}`;
+
+                    // If bar closed, re-evaluate patterns
+                    if (k.x) {
+                        runPatternDetection();
+                    }
+                }
+            };
+
+            state.ws.onerror = (err) => {
+                console.error("WebSocket Error:", err);
+                updateWSStatus(false, 'Error');
+            };
+
+            state.ws.onclose = () => {
+                updateWSStatus(false, 'Disconnected');
+            };
+        }
+
+        function updateWSStatus(connected, text) {
+            const statusDot = document.getElementById('wsStatus');
+            const statusText = document.getElementById('wsStatusText');
+            statusText.innerText = text;
+            
+            if (connected) {
+                statusDot.className = 'inline-block w-2.5 h-2.5 rounded-full bg-binanceGreen mr-2';
+            } else {
+                statusDot.className = 'inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 animate-pulse';
+            }
+        }
+
+        function updateTickerBar(candle, klineData) {
+            const priceEl = document.getElementById('tickerPrice');
+            const changeEl = document.getElementById('tickerChange');
+            
+            const price = candle.close;
+            const open24h = parseFloat(klineData.o);
+            const changePct = ((price - open24h) / open24h) * 100;
+
+            priceEl.innerText = price.toFixed(2);
+            changeEl.innerText = `${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%`;
+            
+            if (changePct >= 0) {
+                priceEl.className = "font-mono font-bold text-lg text-binanceGreen";
+                changeEl.className = "font-mono font-semibold text-binanceGreen";
+            } else {
+                priceEl.className = "font-mono font-bold text-lg text-binanceRed";
+                changeEl.className = "font-mono font-semibold text-binanceRed";
+            }
+
+            document.getElementById('tickerHigh').innerText = parseFloat(klineData.h).toFixed(2);
+            document.getElementById('tickerLow').innerText = parseFloat(klineData.l).toFixed(2);
+            document.getElementById('tickerVolume').innerText = Math.round(parseFloat(klineData.v)).toLocaleString();
+        }
+
+        // Pattern Detectors
+        function detectDoji(candle) {
+            const body = Math.abs(candle.close - candle.open);
+            const range = candle.high - candle.low;
+            return range > 0 && (body / range) <= 0.1;
+        }
+
+        function detectHammer(candle) {
+            const body = Math.abs(candle.close - candle.open);
+            const range = candle.high - candle.low;
+            if (range === 0) return null;
+            
+            const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+            const upperWick = candle.high - Math.max(candle.open, candle.close);
+
+            if (lowerWick >= body * 2 && upperWick <= body * 0.5) {
+                return candle.close >= candle.open ? 'Bullish Hammer' : 'Hanging Man';
+            }
+            return null;
+        }
+
+        function detectEngulfing(c1, c2) {
+            if (!c1 || !c2) return null;
+            const c1Body = c1.close - c1.open;
+            const c2Body = c2.close - c2.open;
+
+            // Bullish Engulfing
+            if (c1Body < 0 && c2Body > 0) {
+                if (c2.open <= c1.close && c2.close >= c1.open) return 'Bullish Engulfing';
+            }
+            // Bearish Engulfing
+            if (c1Body > 0 && c2Body < 0) {
+                if (c2.open >= c1.close && c2.close <= c1.open) return 'Bearish Engulfing';
+            }
+            return null;
+        }
+
+        function detectMorningEveningStar(c1, c2, c3) {
+            if (!c1 || !c2 || !c3) return null;
+            const c1Body = c1.close - c1.open;
+            const c2Body = Math.abs(c2.close - c2.open);
+            const c3Body = c3.close - c3.open;
+
+            if (c1Body < -0.5 && c2Body <= Math.abs(c1Body) * 0.3 && c3Body > 0.5) {
+                return 'Morning Star';
+            }
+            if (c1Body > 0.5 && c2Body <= c1Body * 0.3 && c3Body < -0.5) {
+                return 'Evening Star';
+            }
+            return null;
+        }
+
+        function findSwingPoints(klines, left = 3, right = 3) {
+            const swingHighs = [];
+            const swingLows = [];
+
+            for (let i = left; i < klines.length - right; i++) {
+                let isHigh = true;
+                let isLow = true;
+
+                for (let j = i - left; j <= i + right; j++) {
+                    if (j === i) continue;
+                    if (klines[j].high >= klines[i].high) isHigh = false;
+                    if (klines[j].low <= klines[i].low) isLow = false;
+                }
+
+                if (isHigh) swingHighs.push({ index: i, ...klines[i] });
+                if (isLow) swingLows.push({ index: i, ...klines[i] });
+            }
+
+            return { swingHighs, swingLows };
+        }
+
+        function detectHeadAndShoulders(swingHighs) {
+            if (swingHighs.length < 3) return null;
+            const p1 = swingHighs[swingHighs.length - 3];
+            const p2 = swingHighs[swingHighs.length - 2];
+            const p3 = swingHighs[swingHighs.length - 1];
+
+            if (p2.high > p1.high && p2.high > p3.high) {
+                const shoulderDiff = Math.abs(p1.high - p3.high) / p1.high;
+                if (shoulderDiff < 0.03) {
+                    return { type: 'Head & Shoulders', index: p3.index, price: p3.high, p1, p2, p3 };
+                }
+            }
+            return null;
+        }
+
+        function detectTriangles(swingHighs, swingLows) {
+            if (swingHighs.length < 2 || swingLows.length < 2) return null;
+
+            const h1 = swingHighs[swingHighs.length - 2];
+            const h2 = swingHighs[swingHighs.length - 1];
+            const l1 = swingLows[swingLows.length - 2];
+            const l2 = swingLows[swingLows.length - 1];
+
+            const highSlope = (h2.high - h1.high) / (h2.index - h1.index);
+            const lowSlope = (l2.low - l1.low) / (l2.index - l1.index);
+
+            if (highSlope < 0 && lowSlope > 0) {
+                return { type: 'Symmetrical Triangle', index: h2.index, h1, h2, l1, l2 };
+            } else if (Math.abs(highSlope) < 0.001 && lowSlope > 0) {
+                return { type: 'Ascending Triangle', index: h2.index, h1, h2, l1, l2 };
+            } else if (highSlope < 0 && Math.abs(lowSlope) < 0.001) {
+                return { type: 'Descending Triangle', index: h2.index, h1, h2, l1, l2 };
+            }
+            return null;
+        }
+
+        function detectFlags(klines) {
+            if (klines.length < 20) return null;
+            const recent = klines.slice(-20);
+            
+            const poleMove = (recent[10].close - recent[0].open) / recent[0].open;
+            if (Math.abs(poleMove) > 0.03) {
+                const consol = recent.slice(10);
+                const maxC = Math.max(...consol.map(c => c.high));
+                const minC = Math.min(...consol.map(c => c.low));
+                const rangeRatio = (maxC - minC) / minC;
+
+                if (rangeRatio < 0.015) {
+                    return {
+                        type: poleMove > 0 ? 'Bullish Flag' : 'Bearish Flag',
+                        index: klines.length - 1
+                    };
+                }
+            }
+            return null;
+        }
+
+        function detectDoubleTopBottom(swingHighs, swingLows) {
+            if (swingHighs.length >= 2) {
+                const h1 = swingHighs[swingHighs.length - 2];
+                const h2 = swingHighs[swingHighs.length - 1];
+                const diff = Math.abs(h1.high - h2.high) / h1.high;
+                if (diff < 0.008) {
+                    return { type: 'Double Top', index: h2.index, h1, h2 };
+                }
+            }
+            if (swingLows.length >= 2) {
+                const l1 = swingLows[swingLows.length - 2];
+                const l2 = swingLows[swingLows.length - 1];
+                const diff = Math.abs(l1.low - l2.low) / l1.low;
+                if (diff < 0.008) {
+                    return { type: 'Double Bottom', index: l2.index, l1, l2 };
+                }
+            }
+            return null;
+        }
+
+        // Evaluate outcome for detected pattern instance
+        function evaluatePatternOutcome(barIndex, direction, targetRR = 1.5) {
+            const klines = state.klines;
+            if (barIndex >= klines.length - 1) {
+                return { outcome: 'PENDING', entryPrice: klines[barIndex].close, slPrice: 0, tpPrice: 0 };
+            }
+
+            const entryPrice = klines[barIndex + 1].open;
+            let atrSum = 0;
+            for (let a = Math.max(0, barIndex - 5); a < barIndex; a++) {
+                atrSum += (klines[a].high - klines[a].low);
+            }
+            const atr = (atrSum / 5) || (entryPrice * 0.01);
+
+            const stopDistance = atr * 1.0;
+            const takeProfitDistance = stopDistance * targetRR;
+
+            const slPrice = direction === 'BUY' ? entryPrice - stopDistance : entryPrice + stopDistance;
+            const tpPrice = direction === 'BUY' ? entryPrice + takeProfitDistance : entryPrice - takeProfitDistance;
+
+            let outcome = 'PENDING';
+            for (let j = barIndex + 1; j < Math.min(barIndex + 25, klines.length); j++) {
+                const bar = klines[j];
+                if (direction === 'BUY') {
+                    if (bar.low <= slPrice) { outcome = 'LOSS'; break; }
+                    if (bar.high >= tpPrice) { outcome = 'WIN'; break; }
+                } else {
+                    if (bar.high >= slPrice) { outcome = 'LOSS'; break; }
+                    if (bar.low <= tpPrice) { outcome = 'WIN'; break; }
+                }
+            }
+
+            return { outcome, entryPrice, slPrice, tpPrice };
+        }
+
+        function clearPatternLines() {
+            if (state.patternLinesSeries && state.patternLinesSeries.length > 0) {
+                state.patternLinesSeries.forEach(s => {
+                    try { state.chart.removeSeries(s); } catch (e) {}
+                });
+            }
+            state.patternLinesSeries = [];
+        }
+
+        function runPatternDetection() {
+            if (state.klines.length < 30) return;
+
+            clearPatternLines();
+            state.markersMap.clear();
+
+            const activeFilters = getActivePatternFilters();
+            const markers = [];
+            const signalsFeed = [];
+            const detectedInstances = [];
+            const klines = state.klines;
+
+            // 1. Candlestick Scan
+            for (let i = 2; i < klines.length; i++) {
+                const c3 = klines[i];
+                const c2 = klines[i - 1];
+                const c1 = klines[i - 2];
+
+                // Doji
+                if (activeFilters.doji && detectDoji(c3)) {
+                    const evalRes = evaluatePatternOutcome(i, c3.close >= c3.open ? 'BUY' : 'SELL');
+                    const item = { type: 'Doji', time: c3.time, bar: i, ...evalRes };
+                    detectedInstances.push(item);
+                    state.markersMap.set(c3.time, item);
+
+                    markers.push({
+                        time: c3.time,
+                        position: 'aboveBar',
+                        color: '#F0B90B',
+                        shape: 'circle',
+                        text: 'Doji'
+                    });
+                    if (i >= klines.length - 10) signalsFeed.push(item);
+                }
+
+                // Hammer / Hanging Man
+                if (activeFilters.hammer) {
+                    const hammer = detectHammer(c3);
+                    if (hammer) {
+                        const isBull = hammer === 'Bullish Hammer';
+                        const evalRes = evaluatePatternOutcome(i, isBull ? 'BUY' : 'SELL');
+                        const item = { type: hammer, time: c3.time, bar: i, ...evalRes };
+                        detectedInstances.push(item);
+                        state.markersMap.set(c3.time, item);
+
+                        markers.push({
+                            time: c3.time,
+                            position: isBull ? 'belowBar' : 'aboveBar',
+                            color: isBull ? '#0ECB81' : '#E65365',
+                            shape: isBull ? 'arrowUp' : 'arrowDown',
+                            text: hammer
+                        });
+                        if (i >= klines.length - 10) signalsFeed.push(item);
+                    }
+                }
+
+                // Engulfing
+                if (activeFilters.engulfing) {
+                    const engulfing = detectEngulfing(c2, c3);
+                    if (engulfing) {
+                        const isBull = engulfing === 'Bullish Engulfing';
+                        const evalRes = evaluatePatternOutcome(i, isBull ? 'BUY' : 'SELL');
+                        const item = { type: engulfing, time: c3.time, bar: i, ...evalRes };
+                        detectedInstances.push(item);
+                        state.markersMap.set(c3.time, item);
+
+                        markers.push({
+                            time: c3.time,
+                            position: isBull ? 'belowBar' : 'aboveBar',
+                            color: isBull ? '#0ECB81' : '#E65365',
+                            shape: isBull ? 'arrowUp' : 'arrowDown',
+                            text: isBull ? 'Bull Engulf' : 'Bear Engulf'
+                        });
+                        if (i >= klines.length - 10) signalsFeed.push(item);
+                    }
+                }
+
+                // Star
+                if (activeFilters.star) {
+                    const star = detectMorningEveningStar(c1, c2, c3);
+                    if (star) {
+                        const isBull = star === 'Morning Star';
+                        const evalRes = evaluatePatternOutcome(i, isBull ? 'BUY' : 'SELL');
+                        const item = { type: star, time: c3.time, bar: i, ...evalRes };
+                        detectedInstances.push(item);
+                        state.markersMap.set(c3.time, item);
+
+                        markers.push({
+                            time: c3.time,
+                            position: isBull ? 'belowBar' : 'aboveBar',
+                            color: isBull ? '#0ECB81' : '#E65365',
+                            shape: 'square',
+                            text: star
+                        });
+                        if (i >= klines.length - 10) signalsFeed.push(item);
+                    }
+                }
+            }
+
+            // 2. Graphical Pattern Scan
+            const { swingHighs, swingLows } = findSwingPoints(klines);
+
+            if (activeFilters.headAndShoulders) {
+                const hs = detectHeadAndShoulders(swingHighs);
+                if (hs && klines[hs.index]) {
+                    const evalRes = evaluatePatternOutcome(hs.index, 'SELL');
+                    const item = { type: 'Head & Shoulders', time: klines[hs.index].time, bar: hs.index, ...evalRes };
+                    detectedInstances.push(item);
+                    state.markersMap.set(klines[hs.index].time, item);
+
+                    markers.push({
+                        time: klines[hs.index].time,
+                        position: 'aboveBar',
+                        color: '#A855F7',
+                        shape: 'square',
+                        text: 'H&S Pattern'
+                    });
+                    signalsFeed.push(item);
+
+                    // Draw Neckline
+                    if (hs.p1 && hs.p3) {
+                        const lineSeries = state.chart.addLineSeries({ color: '#A855F7', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed });
+                        lineSeries.setData([
+                            { time: hs.p1.time, value: hs.p1.high },
+                            { time: hs.p2.time, value: hs.p2.high },
+                            { time: hs.p3.time, value: hs.p3.high }
+                        ]);
+                        state.patternLinesSeries.push(lineSeries);
+                    }
+                }
+            }
+
+            if (activeFilters.triangles) {
+                const tri = detectTriangles(swingHighs, swingLows);
+                if (tri && klines[tri.index]) {
+                    const dir = tri.type === 'Descending Triangle' ? 'SELL' : 'BUY';
+                    const evalRes = evaluatePatternOutcome(tri.index, dir);
+                    const item = { type: tri.type, time: klines[tri.index].time, bar: tri.index, ...evalRes };
+                    detectedInstances.push(item);
+                    state.markersMap.set(klines[tri.index].time, item);
+
+                    markers.push({
+                        time: klines[tri.index].time,
+                        position: 'belowBar',
+                        color: '#06B6D4',
+                        shape: 'arrowUp',
+                        text: tri.type
+                    });
+                    signalsFeed.push(item);
+
+                    // Draw Triangle Boundary Lines
+                    if (tri.h1 && tri.h2 && tri.l1 && tri.l2) {
+                        const topLine = state.chart.addLineSeries({ color: '#06B6D4', lineWidth: 2 });
+                        topLine.setData([{ time: tri.h1.time, value: tri.h1.high }, { time: tri.h2.time, value: tri.h2.high }]);
+                        const bottomLine = state.chart.addLineSeries({ color: '#06B6D4', lineWidth: 2 });
+                        bottomLine.setData([{ time: tri.l1.time, value: tri.l1.low }, { time: tri.l2.time, value: tri.l2.low }]);
+                        state.patternLinesSeries.push(topLine, bottomLine);
+                    }
+                }
+            }
+
+            if (activeFilters.flags) {
+                const flag = detectFlags(klines);
+                if (flag && klines[flag.index]) {
+                    const dir = flag.type === 'Bullish Flag' ? 'BUY' : 'SELL';
+                    const evalRes = evaluatePatternOutcome(flag.index, dir);
+                    const item = { type: flag.type, time: klines[flag.index].time, bar: flag.index, ...evalRes };
+                    detectedInstances.push(item);
+                    state.markersMap.set(klines[flag.index].time, item);
+
+                    markers.push({
+                        time: klines[flag.index].time,
+                        position: 'aboveBar',
+                        color: '#EC4899',
+                        shape: 'circle',
+                        text: flag.type
+                    });
+                    signalsFeed.push(item);
+                }
+            }
+
+            if (activeFilters.doubleTopBottom) {
+                const dtb = detectDoubleTopBottom(swingHighs, swingLows);
+                if (dtb && klines[dtb.index]) {
+                    const dir = dtb.type === 'Double Bottom' ? 'BUY' : 'SELL';
+                    const evalRes = evaluatePatternOutcome(dtb.index, dir);
+                    const item = { type: dtb.type, time: klines[dtb.index].time, bar: dtb.index, ...evalRes };
+                    detectedInstances.push(item);
+                    state.markersMap.set(klines[dtb.index].time, item);
+
+                    markers.push({
+                        time: klines[dtb.index].time,
+                        position: 'aboveBar',
+                        color: '#F97316',
+                        shape: 'square',
+                        text: dtb.type
+                    });
+                    signalsFeed.push(item);
+                }
+            }
+
+            // Apply Markers to Chart
+            const showMarkers = document.getElementById('toggleMarkers').checked;
+            state.candlestickSeries.setMarkers(showMarkers ? markers : []);
+
+            // Compute Global Statistics per Pattern
+            calculatePatternStats(detectedInstances);
+
+            // Render Feed List
+            renderDetectedFeed(signalsFeed);
+        }
+
+        function calculatePatternStats(instances) {
+            const patternGroups = {};
+
+            instances.forEach(inst => {
+                if (!patternGroups[inst.type]) {
+                    patternGroups[inst.type] = { wins: 0, losses: 0, pending: 0, total: 0 };
+                }
+                patternGroups[inst.type].total++;
+                if (inst.outcome === 'WIN') patternGroups[inst.type].wins++;
+                else if (inst.outcome === 'LOSS') patternGroups[inst.type].losses++;
+                else patternGroups[inst.type].pending++;
+            });
+
+            const statsMap = {};
+            const allTypes = [
+                'Bullish Engulfing', 'Bearish Engulfing', 'Bullish Hammer', 'Hanging Man', 
+                'Morning Star', 'Evening Star', 'Doji', 'Head & Shoulders', 
+                'Symmetrical Triangle', 'Ascending Triangle', 'Descending Triangle', 
+                'Bullish Flag', 'Bearish Flag', 'Double Top', 'Double Bottom'
+            ];
+
+            allTypes.forEach(type => {
+                const g = patternGroups[type] || { wins: 0, losses: 0, pending: 0, total: 0 };
+                const completed = g.wins + g.losses;
+                const winRate = completed > 0 ? (g.wins / completed) * 100 : 0;
+                const profitFactor = g.losses > 0 ? (g.wins * 1.5) / (g.losses * 1.0) : (g.wins > 0 ? 1.5 * g.wins : 0);
+                const expectancy = completed > 0 ? ((winRate / 100) * 1.5) - ((1 - winRate / 100) * 1.0) : 0;
+
+                statsMap[type] = {
+                    total: g.total,
+                    wins: g.wins,
+                    losses: g.losses,
+                    winRate,
+                    profitFactor,
+                    expectancy
+                };
+            });
+
+            state.patternGlobalStats = statsMap;
+            renderPatternStatsBottomPanel(statsMap);
+        }
+
+        function renderPatternStatsBottomPanel(statsMap) {
+            const grid = document.getElementById('patternStatsGrid');
+            const sortedKeys = Object.keys(statsMap).filter(k => statsMap[k].total > 0);
+
+            if (sortedKeys.length === 0) {
+                grid.innerHTML = `<div class="text-xs text-gray-500 italic col-span-full text-center py-2">No pattern data detected on current view</div>`;
+                return;
+            }
+
+            grid.innerHTML = sortedKeys.map(type => {
+                const st = statsMap[type];
+                const isGood = st.winRate >= 50;
+                const wrColor = isGood ? 'text-binanceGreen' : 'text-binanceRed';
+                const expColor = st.expectancy >= 0 ? 'text-binanceGreen' : 'text-binanceRed';
+
+                return `
+                    <div class="bg-binanceDark p-2 rounded border border-binanceBorder/80 hover:border-binanceYellow/50 transition">
+                        <div class="text-[10px] font-bold text-gray-300 truncate" title="${type}">${type}</div>
+                        <div class="flex items-baseline justify-between my-1">
+                            <span class="text-xs font-mono font-bold ${wrColor}">${st.winRate.toFixed(1)}%</span>
+                            <span class="text-[9px] text-gray-400 font-mono">${st.wins}W / ${st.losses}L</span>
+                        </div>
+                        <div class="flex justify-between text-[9px] text-gray-400 font-mono border-t border-binanceBorder/40 pt-1">
+                            <span>PF: <span class="text-white">${st.profitFactor.toFixed(2)}</span></span>
+                            <span>Exp: <span class="${expColor}">${st.expectancy.toFixed(2)}R</span></span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function getActivePatternFilters() {
+            const checkboxes = document.querySelectorAll('.pattern-checkbox');
+            const filters = {};
+            checkboxes.forEach(cb => {
+                filters[cb.getAttribute('data-pattern')] = cb.checked;
+            });
+            return filters;
+        }
+
+        function renderDetectedFeed(signals) {
+            const feedContainer = document.getElementById('detectedFeed');
+            if (!signals || signals.length === 0) {
+                feedContainer.innerHTML = `<div class="text-xs text-gray-500 italic text-center py-4">No recent signals detected</div>`;
+                return;
+            }
+
+            feedContainer.innerHTML = signals.slice(-8).reverse().map(s => {
+                const dateStr = new Date(s.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const outcomeBadge = s.outcome === 'WIN' 
+                    ? '<span class="text-[9px] bg-binanceGreen/20 text-binanceGreen px-1 rounded font-bold">WIN</span>'
+                    : (s.outcome === 'LOSS' ? '<span class="text-[9px] bg-binanceRed/20 text-binanceRed px-1 rounded font-bold">LOSS</span>' : '<span class="text-[9px] bg-yellow-500/20 text-yellow-400 px-1 rounded">PEND</span>');
+
+                return `
+                    <div class="flex items-center justify-between bg-binanceDark p-2 rounded border border-binanceBorder text-xs hover:border-binanceYellow cursor-pointer transition" onclick="jumpToBar(${s.bar})">
+                        <div class="flex items-center space-x-2">
+                            <i class="fa-solid fa-bolt text-binanceYellow text-[10px]"></i>
+                            <span class="font-semibold text-gray-200">${s.type}</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            ${outcomeBadge}
+                            <span class="text-[10px] text-gray-400 font-mono">${dateStr}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function jumpToBar(barIndex) {
+            if (state.klines[barIndex]) {
+                state.chart.timeScale().scrollToPosition(barIndex - state.klines.length + 10, true);
+            }
+        }
+
+        function runBacktest() {
+            const targetPattern = document.getElementById('backtestPattern').value;
+            const tpRatio = parseFloat(document.getElementById('tpRatio').value) || 1.5;
+            const slMult = parseFloat(document.getElementById('slMult').value) || 1.0;
+            const candleLimit = parseInt(document.getElementById('backtestCandleLimit').value) || 1000;
+
+            const klines = state.klines.slice(-candleLimit);
+            if (klines.length < 50) {
+                alert("Insufficient data loaded to perform backtest.");
+                return;
+            }
+
+            document.getElementById('btStatus').innerText = 'Running...';
+            document.getElementById('btStatus').className = 'text-[10px] text-binanceYellow font-bold animate-pulse';
+
+            let trades = [];
+            let currentCapital = 1000;
+            const capitalHistory = [1000];
+
+            for (let i = 10; i < klines.length - 10; i++) {
+                let signal = null;
+
+                if (targetPattern === 'engulfing') {
+                    const eng = detectEngulfing(klines[i-1], klines[i]);
+                    if (eng === 'Bullish Engulfing') signal = 'BUY';
+                    if (eng === 'Bearish Engulfing') signal = 'SELL';
+                } else if (targetPattern === 'hammer') {
+                    const ham = detectHammer(klines[i]);
+                    if (ham === 'Bullish Hammer') signal = 'BUY';
+                    if (ham === 'Hanging Man') signal = 'SELL';
+                } else if (targetPattern === 'star') {
+                    const star = detectMorningEveningStar(klines[i-2], klines[i-1], klines[i]);
+                    if (star === 'Morning Star') signal = 'BUY';
+                    if (star === 'Evening Star') signal = 'SELL';
+                } else if (targetPattern === 'triangles' || targetPattern === 'headAndShoulders' || targetPattern === 'flags' || targetPattern === 'doubleTopBottom') {
+                    const prev10 = klines.slice(i-10, i);
+                    const maxH = Math.max(...prev10.map(c => c.high));
+                    const minL = Math.min(...prev10.map(c => c.low));
+
+                    if (klines[i].close > maxH) signal = 'BUY';
+                    if (klines[i].close < minL) signal = 'SELL';
+                }
+
+                if (signal) {
+                    const entryPrice = klines[i + 1].open;
+                    
+                    let atrSum = 0;
+                    for (let a = i - 5; a < i; a++) atrSum += (klines[a].high - klines[a].low);
+                    const atr = (atrSum / 5) || (entryPrice * 0.01);
+
+                    const stopDistance = atr * slMult;
+                    const takeProfitDistance = stopDistance * tpRatio;
+
+                    let slPrice = signal === 'BUY' ? entryPrice - stopDistance : entryPrice + stopDistance;
+                    let tpPrice = signal === 'BUY' ? entryPrice + takeProfitDistance : entryPrice - takeProfitDistance;
+
+                    let outcome = null;
+                    let pnlPct = 0;
+
+                    for (let j = i + 1; j < Math.min(i + 30, klines.length); j++) {
+                        const bar = klines[j];
+                        if (signal === 'BUY') {
+                            if (bar.low <= slPrice) {
+                                outcome = 'LOSS';
+                                pnlPct = -((entryPrice - slPrice) / entryPrice);
+                                break;
+                            }
+                            if (bar.high >= tpPrice) {
+                                outcome = 'WIN';
+                                pnlPct = (tpPrice - entryPrice) / entryPrice;
+                                break;
+                            }
+                        } else {
+                            if (bar.high >= slPrice) {
+                                outcome = 'LOSS';
+                                pnlPct = -((slPrice - entryPrice) / entryPrice);
+                                break;
+                            }
+                            if (bar.low <= tpPrice) {
+                                outcome = 'WIN';
+                                pnlPct = (entryPrice - tpPrice) / entryPrice;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (outcome) {
+                        const tradePnl = currentCapital * pnlPct;
+                        currentCapital += tradePnl;
+                        capitalHistory.push(currentCapital);
+
+                        trades.push({ type: signal, outcome, pnlPct, entryPrice });
+                        i += 5;
+                    }
+                }
+            }
+
+            const totalTrades = trades.length;
+            const wins = trades.filter(t => t.outcome === 'WIN').length;
+            const losses = trades.filter(t => t.outcome === 'LOSS').length;
+            const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+
+            const totalWinPct = trades.filter(t => t.pnlPct > 0).reduce((acc, t) => acc + t.pnlPct, 0);
+            const totalLossPct = Math.abs(trades.filter(t => t.pnlPct < 0).reduce((acc, t) => acc + t.pnlPct, 0));
+            const profitFactor = totalLossPct > 0 ? (totalWinPct / totalLossPct) : totalWinPct;
+
+            const netReturn = ((currentCapital - 1000) / 1000) * 100;
+
+            let maxPeak = capitalHistory[0];
+            let maxDD = 0;
+            for (let cap of capitalHistory) {
+                if (cap > maxPeak) maxPeak = cap;
+                const dd = (maxPeak - cap) / maxPeak;
+                if (dd > maxDD) maxDD = dd;
+            }
+
+            document.getElementById('btWinRate').innerText = `${winRate.toFixed(1)}%`;
+            document.getElementById('btTrades').innerText = totalTrades;
+            document.getElementById('btProfitFactor').innerText = profitFactor.toFixed(2);
+            document.getElementById('btNetReturn').innerText = `${netReturn >= 0 ? '+' : ''}${netReturn.toFixed(2)}%`;
+            document.getElementById('btNetReturn').className = `text-lg font-mono font-bold ${netReturn >= 0 ? 'text-binanceGreen' : 'text-binanceRed'}`;
+            
+            document.getElementById('btWins').innerText = wins;
+            document.getElementById('btLosses').innerText = losses;
+            document.getElementById('btMaxDD').innerText = `${(maxDD * 100).toFixed(2)}%`;
+
+            document.getElementById('btStatus').innerText = 'Completed';
+            document.getElementById('btStatus').className = 'text-[10px] text-binanceGreen font-bold';
+        }
+
+        function switchSidebarTab(tab) {
+            state.activeTab = tab;
+            const pTab = document.getElementById('tabPatterns');
+            const bTab = document.getElementById('tabBacktest');
+            const pBtn = document.getElementById('tabPatternsBtn');
+            const bBtn = document.getElementById('tabBacktestBtn');
+
+            if (tab === 'patterns') {
+                pTab.classList.remove('hidden');
+                bTab.classList.add('hidden');
+                pBtn.classList.add('tab-active');
+                bBtn.classList.remove('tab-active');
+            } else {
+                pTab.classList.add('hidden');
+                bTab.classList.remove('hidden');
+                pBtn.classList.remove('tab-active');
+                bBtn.classList.add('tab-active');
+            }
+        }
+
+        function toggleGroup(type, status) {
+            const patternType = type === 'candle' ? ['doji', 'hammer', 'engulfing', 'star'] : ['headAndShoulders', 'triangles', 'flags', 'doubleTopBottom'];
+            document.querySelectorAll('.pattern-checkbox').forEach(cb => {
+                if (patternType.includes(cb.getAttribute('data-pattern'))) {
+                    cb.checked = status;
+                }
+            });
+            runPatternDetection();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('symbolSelect').addEventListener('change', (e) => {
+                state.symbol = e.target.value;
+                document.getElementById('chartSymbolDisplay').innerText = `${state.symbol.replace('USDT', '')}/USDT`;
+                fetchHistoricalKlines(state.symbol, state.timeframe);
+                connectWebSocket(state.symbol, state.timeframe);
+            });
+
+            document.querySelectorAll('.tf-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    document.querySelectorAll('.tf-btn').forEach(b => {
+                        b.className = 'tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover text-gray-400';
+                    });
+                    e.target.className = 'tf-btn px-2.5 py-1 text-xs rounded font-medium hover:bg-binanceHover bg-binanceBorder text-binanceYellow font-bold';
+                    
+                    state.timeframe = e.target.getAttribute('data-tf');
+                    document.getElementById('chartTfDisplay').innerText = state.timeframe;
+                    fetchHistoricalKlines(state.symbol, state.timeframe);
+                    connectWebSocket(state.symbol, state.timeframe);
+                });
+            });
+
+            document.querySelectorAll('.pattern-checkbox').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    runPatternDetection();
+                });
+            });
+
+            document.getElementById('toggleMarkers').addEventListener('change', () => {
+                runPatternDetection();
+            });
+        }
+
+        window.onload = function() {
+            initChart();
+            setupEventListeners();
+            fetchHistoricalKlines(state.symbol, state.timeframe);
+            connectWebSocket(state.symbol, state.timeframe);
+        };
+    </script>
+</body>
+</html>
