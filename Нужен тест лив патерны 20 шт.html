@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Binance Futures XAUTUSDT — 20 Pattern Backtester</title>
+    <!-- Подключаем строго стабильную версию v4.2.0 Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b0e11;
+            --panel-bg: #1e2329;
+            --border-color: #2b313a;
+            --text-color: #eaecef;
+            --text-muted: #848e9c;
+            --accent-green: #0ecb81;
+            --accent-red: #f6465d;
+            --accent-blue: #2962ff;
+            --accent-yellow: #f0b90b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); min-height: 100vh; padding: 15px; display: flex; flex-direction: column; }
+        
+        header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
+        .symbol-badge { background: var(--accent-yellow); color: #000; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+        
+        .grid-container { display: grid; grid-template-columns: 320px 1fr; gap: 15px; flex: 1; }
+        .sidebar { display: flex; flex-direction: column; gap: 12px; }
+        
+        .card { background-color: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; }
+        .card-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 10px; display: flex; justify-content: space-between; }
+        
+        .form-group { margin-bottom: 8px; }
+        label { display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 3px; }
+        select, input { width: 100%; padding: 7px; background-color: var(--bg-color); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-color); font-size: 0.85rem; }
+        
+        .btn { width: 100%; padding: 8px; border: none; border-radius: 4px; font-weight: 600; cursor: pointer; margin-top: 4px; font-size: 0.85rem; }
+        .btn-primary { background-color: var(--accent-blue); color: white; }
+        .btn-yellow { background-color: var(--accent-yellow); color: black; }
+        .btn-green { background-color: var(--accent-green); color: white; }
+        .btn-red { background-color: var(--accent-red); color: white; }
+
+        .chart-section { display: flex; flex-direction: column; gap: 12px; }
+        #chart-wrapper { position: relative; height: 420px; background-color: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 8px; width: 100%; }
+        
+        .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+        .metric-card { background-color: var(--panel-bg); border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; text-align: center; }
+        .metric-val { font-size: 1.1rem; font-weight: bold; margin-top: 3px; }
+        
+        .text-green { color: var(--accent-green); }
+        .text-red { color: var(--accent-red); }
+
+        .table-container { max-height: 220px; overflow-y: auto; background-color: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; text-align: left; }
+        th { background-color: #161a1e; padding: 8px; color: var(--text-muted); position: sticky; top: 0; }
+        td { padding: 6px 8px; border-bottom: 1px solid var(--border-color); }
+        tr:hover { background-color: rgba(255,255,255,0.04); cursor: pointer; }
+        tr.selected-trade { background-color: rgba(41, 98, 255, 0.25) !important; }
+
+        .ranking-list { max-height: 160px; overflow-y: auto; font-size: 0.78rem; }
+        .ranking-item { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border-color); }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <h3>Binance Futures Scanner</h3>
+        <span class="symbol-badge" id="pair-badge">XAUTUSDT</span>
+        <span id="live-price-header" style="font-weight: bold;">$0.00</span>
+    </div>
+    <div style="font-size: 0.8rem; color: var(--text-muted);">
+        Статус: <span id="status-indicator" class="text-green">Загрузка данных...</span>
+    </div>
+</header>
+
+<div class="grid-container">
+    <div class="sidebar">
+        <div class="card">
+            <div class="card-title">Параметры Теста</div>
+            <div class="form-group">
+                <label>Торговая пара</label>
+                <select id="symbol-select">
+                    <option value="XAUTUSDT" selected>XAUTUSDT (Gold Futures)</option>
+                    <option value="BTCUSDT">BTCUSDT (Bitcoin)</option>
+                    <option value="ETHUSDT">ETHUSDT (Ethereum)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Таймфрейм</label>
+                <select id="timeframe-select">
+                    <option value="15m" selected>15 Минут (M15)</option>
+                    <option value="30m">30 Минут (M30)</option>
+                    <option value="1h">1 Час (H1)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Паттерн для бэктеста</label>
+                <select id="pattern-select"></select>
+            </div>
+            <button class="btn btn-primary" id="btn-run-backtest">Протестировать паттерн</button>
+            <button class="btn btn-yellow" id="btn-run-all">🚀 Прогнать все 20 паттернов</button>
+        </div>
+
+        <div class="card">
+            <div class="card-title">
+                <span>Live Ставка ($10)</span>
+            </div>
+            <div id="live-stake-body">
+                <div style="font-size: 0.8rem; margin-bottom: 6px;">
+                    PnL: <b id="stk-pnl" class="text-green">+$0.00</b>
+                </div>
+                <button class="btn btn-green" id="btn-manual-buy">Открыть $10 LONG</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Рейтинг Паттернов</div>
+            <div class="ranking-list" id="ranking-list">
+                <div style="color: var(--text-muted);">Нажмите "Прогнать все 20 паттернов"</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-section">
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <label>Чистый PnL ($10)</label>
+                <div class="metric-val" id="met-pnl">$0.00</div>
+            </div>
+            <div class="metric-card">
+                <label>Винрейт</label>
+                <div class="metric-val" id="met-winrate">0%</div>
+            </div>
+            <div class="metric-card">
+                <label>Всего Сделок</label>
+                <div class="metric-val" id="met-total">0</div>
+            </div>
+            <div class="metric-card">
+                <label>Профит-Фактор</label>
+                <div class="metric-val" id="met-pf">0.00</div>
+            </div>
+        </div>
+
+        <div id="chart-wrapper"></div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Время</th>
+                        <th>Паттерн</th>
+                        <th>Тип</th>
+                        <th>Вход</th>
+                        <th>Take Profit</th>
+                        <th>Stop Loss</th>
+                        <th>Выход</th>
+                        <th>PnL ($)</th>
+                    </tr>
+                </thead>
+                <tbody id="trade-history-body">
+                    <tr><td colspan="9" style="text-align:center; color: var(--text-muted); padding: 15px;">История пуста.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+const PATTERNS_CONFIG = [
+    { id: 'hammer', name: '1. Молот (Hammer)', type: 'LONG' },
+    { id: 'inv_hammer', name: '2. Перевернутый молот', type: 'LONG' },
+    { id: 'bull_engulfing', name: '3. Бычье поглощение', type: 'LONG' },
+    { id: 'morning_star', name: '4. Утренняя звезда', type: 'LONG' },
+    { id: 'bull_pinbar', name: '5. Бычий Пинбар', type: 'LONG' },
+    { id: 'piercing_line', name: '6. Проникающая свеча', type: 'LONG' },
+    { id: 'bull_harami', name: '7. Бычий Харами', type: 'LONG' },
+    { id: 'tweezer_bottom', name: '8. Двойное дно', type: 'LONG' },
+    { id: 'long_legged_doji', name: '9. Длинноногий Доджи', type: 'LONG' },
+    { id: 'three_white_soldiers', name: '10. Три белых солдата', type: 'LONG' },
+    { id: 'shooting_star', name: '11. Падающая звезда', type: 'SHORT' },
+    { id: 'hanging_man', name: '12. Повешенный', type: 'SHORT' },
+    { id: 'bear_engulfing', name: '13. Медвежье поглощение', type: 'SHORT' },
+    { id: 'evening_star', name: '14. Вечерняя звезда', type: 'SHORT' },
+    { id: 'bear_pinbar', name: '15. Медвежий Пинбар', type: 'SHORT' },
+    { id: 'dark_cloud', name: '16. Завеса из темных облаков', type: 'SHORT' },
+    { id: 'bear_harami', name: '17. Медвежий Харами', type: 'SHORT' },
+    { id: 'tweezer_top', name: '18. Двойная вершина', type: 'SHORT' },
+    { id: 'three_black_crows', name: '19. Три черные вороны', type: 'SHORT' },
+    { id: 'gravestone_doji', name: '20. Надгробие Доджи', type: 'SHORT' }
+];
+
+let chart = null;
+let candleSeries = null;
+let currentSymbol = 'XAUTUSDT';
+let currentTimeframe = '15m';
+let candleData = [];
+let tradeLogs = [];
+let activeLines = [];
+let livePrice = 0;
+let selectedRow = null;
+
+window.addEventListener('load', () => {
+    initUI();
+    initChart();
+    fetchDataAndRun();
+    initLiveTicker();
+});
+
+function initUI() {
+    const select = document.getElementById('pattern-select');
+    select.innerHTML = '';
+    PATTERNS_CONFIG.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        select.appendChild(opt);
+    });
+
+    document.getElementById('symbol-select').addEventListener('change', (e) => {
+        currentSymbol = e.target.value;
+        document.getElementById('pair-badge').textContent = currentSymbol;
+        fetchDataAndRun();
+    });
+
+    document.getElementById('timeframe-select').addEventListener('change', (e) => {
+        currentTimeframe = e.target.value;
+        fetchDataAndRun();
+    });
+
+    document.getElementById('btn-run-backtest').addEventListener('click', () => {
+        runSinglePattern(document.getElementById('pattern-select').value);
+    });
+
+    document.getElementById('btn-run-all').addEventListener('click', () => {
+        runAllPatternsTest();
+    });
+}
+
+function initChart() {
+    const container = document.getElementById('chart-wrapper');
+    container.innerHTML = ''; // Очистка
+
+    if (typeof LightweightCharts === 'undefined') {
+        alert("Ошибка: Библиотека LightweightCharts не загрузилась. Проверьте интернет-соединение.");
+        return;
+    }
+
+    chart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: container.clientHeight || 420,
+        layout: { backgroundColor: '#1e2329', textColor: '#eaecef' },
+        grid: { vertLines: { color: '#2b313a' }, horzLines: { color: '#2b313a' } },
+        crosshair: { mode: 1 },
+        timeScale: { timeVisible: true }
+    });
+
+    // Безопасное подключение серии свечей (поддержка v3 и v4 API)
+    if (chart.addCandlestickSeries) {
+        candleSeries = chart.addCandlestickSeries({
+            upColor: '#0ecb81', downColor: '#f6465d',
+            borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
+            wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+        });
+    } else if (chart.addSeries) {
+        candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#0ecb81', downColor: '#f6465d',
+            borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
+            wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+        });
+    }
+
+    window.addEventListener('resize', () => {
+        if (chart && container) {
+            chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+        }
+    });
+}
+
+async function fetchDataAndRun() {
+    document.getElementById('status-indicator').textContent = 'Загрузка с Binance...';
+    document.getElementById('status-indicator').className = 'text-green';
+
+    try {
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${currentSymbol}&interval=${currentTimeframe}&limit=300`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("CORS or Network Error");
+        const data = await res.json();
+
+        candleData = data.map(d => ({
+            time: Math.floor(d[0] / 1000),
+            open: parseFloat(d[1]),
+            high: parseFloat(d[2]),
+            low: parseFloat(d[3]),
+            close: parseFloat(d[4]),
+            volume: parseFloat(d[5])
+        }));
+    } catch (err) {
+        console.warn("Binance API недоступно, генерируем локальные тестовые данные...", err);
+        document.getElementById('status-indicator').textContent = 'Демо-режим (Локальные данные)';
+        document.getElementById('status-indicator').className = 'text-red';
+        candleData = generateFallbackData();
+    }
+
+    if (candleSeries) {
+        candleSeries.setData(candleData);
+        chart.timeScale().fitContent();
+    }
+
+    runSinglePattern(document.getElementById('pattern-select').value);
+}
+
+function generateFallbackData() {
+    let now = Math.floor(Date.now() / 1000) - (300 * 900);
+    let price = 2600.0;
+    let list = [];
+    for (let i = 0; i < 300; i++) {
+        let change = (Math.random() - 0.49) * 5;
+        let open = price;
+        let close = price + change;
+        let high = Math.max(open, close) + Math.random() * 3;
+        let low = Math.min(open, close) - Math.random() * 3;
+        price = close;
+        list.push({ time: now + (i * 900), open, high, low, close, volume: 100 });
+    }
+    return list;
+}
+
+function checkPattern(candles, idx, id) {
+    if (idx < 3) return false;
+    const c = candles[idx];
+    const p1 = candles[idx - 1];
+    const p2 = candles[idx - 2];
+
+    const body = Math.abs(c.close - c.open);
+    const range = c.high - c.low;
+    const upperWick = c.high - Math.max(c.open, c.close);
+    const lowerWick = Math.min(c.open, c.close) - c.low;
+
+    if (range === 0) return false;
+
+    switch (id) {
+        case 'hammer': return (lowerWick >= body * 2) && (upperWick <= body * 0.5) && (p1.close < p1.open);
+        case 'inv_hammer': return (upperWick >= body * 2) && (lowerWick <= body * 0.5) && (p1.close < p1.open);
+        case 'bull_engulfing': return (p1.close < p1.open) && (c.close > c.open) && (c.close > p1.open);
+        case 'morning_star': return (p2.close < p2.open) && (c.close > c.open) && (c.close > (p2.open + p2.close) / 2);
+        case 'bull_pinbar': return (lowerWick >= range * 0.6);
+        case 'piercing_line': return (p1.close < p1.open) && (c.close > (p1.open + p1.close) / 2);
+        case 'bull_harami': return (p1.close < p1.open) && (c.close > c.open) && (c.close < p1.open);
+        case 'tweezer_bottom': return Math.abs(c.low - p1.low) < range * 0.05 && (c.close > c.open);
+        case 'long_legged_doji': return (body <= range * 0.1) && (upperWick >= range * 0.35) && (lowerWick >= range * 0.35);
+        case 'three_white_soldiers': return (p2.close > p2.open) && (p1.close > p1.open) && (c.close > c.open);
+        case 'shooting_star': return (upperWick >= body * 2) && (lowerWick <= body * 0.5) && (p1.close > p1.open);
+        case 'hanging_man': return (lowerWick >= body * 2) && (upperWick <= body * 0.5) && (p1.close > p1.open);
+        case 'bear_engulfing': return (p1.close > p1.open) && (c.close < c.open) && (c.close < p1.open);
+        case 'evening_star': return (p2.close > p2.open) && (c.close < c.open) && (c.close < (p2.open + p2.close) / 2);
+        case 'bear_pinbar': return (upperWick >= range * 0.6);
+        case 'dark_cloud': return (p1.close > p1.open) && (c.close < (p1.open + p1.close) / 2);
+        case 'bear_harami': return (p1.close > p1.open) && (c.close < c.open) && (c.close > p1.open);
+        case 'tweezer_top': return Math.abs(c.high - p1.high) < range * 0.05 && (c.close < c.open);
+        case 'three_black_crows': return (p2.close < p2.open) && (p1.close < p1.open) && (c.close < c.open);
+        case 'gravestone_doji': return (body <= range * 0.1) && (upperWick >= range * 0.7);
+        default: return false;
+    }
+}
+
+function runSinglePattern(patternId) {
+    tradeLogs = [];
+    clearLines();
+
+    const pat = PATTERNS_CONFIG.find(p => p.id === patternId);
+    const isLong = pat.type === 'LONG';
+    const markers = [];
+
+    for (let i = 3; i < candleData.length - 1; i++) {
+        if (checkPattern(candleData, i, patternId)) {
+            const entryCandle = candleData[i + 1];
+            const entryPrice = entryCandle.open;
+            
+            markers.push({
+                time: candleData[i].time,
+                position: isLong ? 'belowBar' : 'aboveBar',
+                color: isLong ? '#0ecb81' : '#f6465d',
+                shape: isLong ? 'arrowUp' : 'arrowDown',
+                text: pat.name.split('.')[1]
+            });
+
+            const tpPrice = isLong ? entryPrice * 1.015 : entryPrice * 0.985;
+            const slPrice = isLong ? entryPrice * 0.992 : entryPrice * 1.008;
+
+            let exitPrice = entryPrice;
+            let result = 'NO_EXIT';
+
+            for (let j = i + 1; j < candleData.length; j++) {
+                const c = candleData[j];
+                if (isLong) {
+                    if (c.high >= tpPrice) { exitPrice = tpPrice; result = 'WIN'; break; }
+                    if (c.low <= slPrice) { exitPrice = slPrice; result = 'LOSS'; break; }
+                } else {
+                    if (c.low <= tpPrice) { exitPrice = tpPrice; result = 'WIN'; break; }
+                    if (c.high >= slPrice) { exitPrice = slPrice; result = 'LOSS'; break; }
+                }
+            }
+
+            const pnlUSD = isLong ? ((exitPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - exitPrice) / entryPrice) * 100;
+
+            tradeLogs.push({
+                id: tradeLogs.length + 1,
+                time: new Date(entryCandle.time * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                pattern: pat.name,
+                type: pat.type,
+                entry: entryPrice,
+                tp: tpPrice,
+                sl: slPrice,
+                exit: exitPrice,
+                pnl: pnlUSD,
+                rawTime: entryCandle.time
+            });
+        }
+    }
+
+    if (candleSeries && candleSeries.setMarkers) {
+        candleSeries.setMarkers(markers);
+    }
+    renderTableAndMetrics();
+}
+
+function renderTableAndMetrics() {
+    const tbody = document.getElementById('trade-history-body');
+    tbody.innerHTML = '';
+
+    if (tradeLogs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color: var(--text-muted); padding: 15px;">Сигналов не обнаружено.</td></tr>`;
+        document.getElementById('met-pnl').textContent = '$0.00';
+        document.getElementById('met-winrate').textContent = '0%';
+        document.getElementById('met-total').textContent = '0';
+        document.getElementById('met-pf').textContent = '0.00';
+        return;
+    }
+
+    let totalPnL = 0;
+    let wins = 0;
+    let winVal = 0, lossVal = 0;
+
+    tradeLogs.forEach(trade => {
+        totalPnL += trade.pnl;
+        if (trade.pnl > 0) { wins++; winVal += trade.pnl; }
+        else { lossVal += Math.abs(trade.pnl); }
+
+        const tr = document.createElement('tr');
+        tr.onclick = () => focusOnTrade(trade, tr);
+        tr.innerHTML = `
+            <td>${trade.id}</td>
+            <td>${trade.time}</td>
+            <td><b>${trade.pattern}</b></td>
+            <td class="${trade.type === 'LONG' ? 'text-green' : 'text-red'}">${trade.type}</td>
+            <td>$${trade.entry.toFixed(2)}</td>
+            <td class="text-green">$${trade.tp.toFixed(2)}</td>
+            <td class="text-red">$${trade.sl.toFixed(2)}</td>
+            <td>$${trade.exit.toFixed(2)}</td>
+            <td class="${trade.pnl >= 0 ? 'text-green' : 'text-red'}" style="font-weight:bold;">
+                ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    document.getElementById('met-pnl').textContent = `${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`;
+    document.getElementById('met-pnl').className = `metric-val ${totalPnL >= 0 ? 'text-green' : 'text-red'}`;
+    document.getElementById('met-winrate').textContent = `${((wins / tradeLogs.length) * 100).toFixed(0)}%`;
+    document.getElementById('met-total').textContent = tradeLogs.length;
+    document.getElementById('met-pf').textContent = lossVal === 0 ? winVal.toFixed(1) : (winVal / lossVal).toFixed(2);
+}
+
+function focusOnTrade(trade, tr) {
+    if (selectedRow) selectedRow.classList.remove('selected-trade');
+    tr.classList.add('selected-trade');
+    selectedRow = tr;
+
+    clearLines();
+
+    if (candleSeries && candleSeries.createPriceLine) {
+        activeLines.push(candleSeries.createPriceLine({ price: trade.entry, color: '#f0b90b', title: 'Вход' }));
+        activeLines.push(candleSeries.createPriceLine({ price: trade.tp, color: '#0ecb81', title: 'TP' }));
+        activeLines.push(candleSeries.createPriceLine({ price: trade.sl, color: '#f6465d', title: 'SL' }));
+    }
+}
+
+function clearLines() {
+    activeLines.forEach(l => { if (candleSeries && candleSeries.removePriceLine) candleSeries.removePriceLine(l); });
+    activeLines = [];
+}
+
+function runAllPatternsTest() {
+    const list = document.getElementById('ranking-list');
+    list.innerHTML = '<div style="color:var(--accent-yellow)">Тестирование...</div>';
+    
+    let res = [];
+    PATTERNS_CONFIG.forEach(pat => {
+        let pnl = 0, wins = 0, count = 0;
+        for (let i = 3; i < candleData.length - 1; i++) {
+            if (checkPattern(candleData, i, pat.id)) {
+                count++;
+                const isLong = pat.type === 'LONG';
+                const entry = candleData[i+1].open;
+                const tp = isLong ? entry * 1.015 : entry * 0.985;
+                const sl = isLong ? entry * 0.992 : entry * 1.008;
+
+                for (let j = i + 1; j < candleData.length; j++) {
+                    const c = candleData[j];
+                    if (isLong) {
+                        if (c.high >= tp) { pnl += 1.5; wins++; break; }
+                        if (c.low <= sl) { pnl -= 0.8; break; }
+                    } else {
+                        if (c.low <= tp) { pnl += 1.5; wins++; break; }
+                        if (c.high >= sl) { pnl -= 0.8; break; }
+                    }
+                }
+            }
+        }
+        res.push({ name: pat.name, pnl, winrate: count ? ((wins/count)*100).toFixed(0) : 0, count });
+    });
+
+    res.sort((a,b) => b.pnl - a.pnl);
+    list.innerHTML = '';
+    res.forEach((r, idx) => {
+        list.innerHTML += `
+            <div class="ranking-item">
+                <span><b>#${idx+1}</b> ${r.name.split('.')[1]} (${r.count} сд.)</span>
+                <span class="${r.pnl >= 0 ? 'text-green' : 'text-red'}"><b>${r.pnl >= 0 ? '+' : ''}$${r.pnl.toFixed(1)}</b> (${r.winrate}%)</span>
+            </div>
+        `;
+    });
+}
+
+function initLiveTicker() {
+    setInterval(async () => {
+        try {
+            const r = await fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${currentSymbol}`);
+            const d = await r.json();
+            livePrice = parseFloat(d.price);
+            document.getElementById('live-price-header').textContent = `$${livePrice.toFixed(2)}`;
+        } catch(e) {
+            if(candleData.length > 0) {
+                livePrice = candleData[candleData.length - 1].close;
+                document.getElementById('live-price-header').textContent = `$${livePrice.toFixed(2)}`;
+            }
+        }
+    }, 3000);
+}
+</script>
+</body>
+</html>
