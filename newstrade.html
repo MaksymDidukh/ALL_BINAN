@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Binance Futures — Macro Calendar & Price Impact Analysis</title>
+    <title>Binance Futures — BTC & Gold Separated Analysis</title>
     <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         :root {
@@ -201,11 +201,11 @@
 <body>
 
     <div class="header">
-        <h2>Binance Futures — Macro Calendar & Price Impact Analysis</h2>
+        <h2>Binance Futures — Calendar (BTC vs GOLD Separated)</h2>
         <div class="controls">
             <select id="symbol-select">
-                <option value="BTCUSDT">BTC/USDT (Bitcoin)</option>
-                <option value="PAXGUSDT">PAXG/USDT (Gold Token)</option>
+                <option value="BTCUSDT" selected>BTC/USDT (Crypto Events)</option>
+                <option value="PAXGUSDT">PAXG/USDT (Gold / Macro Events)</option>
             </select>
             <select id="interval-select">
                 <option value="1d" selected>1D (Дневной)</option>
@@ -224,7 +224,7 @@
 
         <div class="sidebar">
             <div class="card">
-                <h3>Календарь Событий</h3>
+                <h3 id="calendar-title">Новости актива</h3>
                 <div class="event-list" id="event-list"></div>
             </div>
 
@@ -232,7 +232,7 @@
                 <h3>Прогноз результатов и Влияние</h3>
                 <div class="details-box" id="details-box">
                     <div style="color: var(--text-muted); text-align: center; padding: 15px 0;">
-                        Нажмите на любое событие из списка выше, чтобы открыть сценарии движения цены
+                        Нажмите на событие для просмотра сценариев
                     </div>
                 </div>
             </div>
@@ -249,200 +249,39 @@
         let eventLineSeries = [];
         let mappedEvents = [];
 
-        const calendarEvents = [
-            // --- ПРОШЕДШИЕ СОБЫТИЯ (СЕНТЯБРЬ 2026) ---
-            { 
-                date: '2026-09-04', 
-                title: 'NFP США (Сентябрь)', 
-                type: 'macro', 
-                status: 'past',
-                forecast: 'Факт: +142k (Ниже прогноза)',
-                bullScenario: 'Слабые данные по занятости укрепили ожидания снижения ставки ФРС на 50 б.п.',
-                bearScenario: 'Опасения касательно замедления экономики США.'
-            },
-            { 
-                date: '2026-09-11', 
-                title: 'Инфляция CPI США (Сентябрь)', 
-                type: 'macro', 
-                status: 'past',
-                forecast: 'Факт: 2.5% YoY',
-                bullScenario: 'Замедление инфляции до минимумов за 3 года подтолкнуло BTC выше $60k.',
-                bearScenario: 'Базовая инфляция (Core CPI) осталась устойчивой.'
-            },
-            { 
-                date: '2026-09-18', 
-                title: 'Решение FOMC ФРС по ставке', 
-                type: 'macro', 
-                status: 'past',
-                forecast: 'Снижение ставки на -0.50%',
-                bullScenario: 'Агрессивный старт цикла смягчения вызвал мощный локальный бычий импульс по рисковым активам.',
-                bearScenario: 'Краткосрочная фиксирование прибыли после анонса.'
-            },
-            { 
-                date: '2026-09-20', 
-                title: 'Экспирация Квартальных Фьючерсов', 
-                type: 'crypto', 
-                status: 'past',
-                forecast: 'Крупный расчет опционов и фьючерсов',
-                bullScenario: 'Удержание ключевых уровней поддержки после закрытия деривативных контрактов.',
-                bearScenario: 'Повышенная волатильность и сжатие ликвидности перед экспирацией.'
-            },
-            { 
-                date: '2026-09-22', 
-                title: 'Solana Breakpoint (Сингапур)', 
-                type: 'crypto', 
-                status: 'past',
-                forecast: 'Презентация Firedancer',
-                bullScenario: 'Анонсы по обновлению сети спровоцировали локальный рост токена SOL.',
-                bearScenario: 'Фиксация по факту завершения конференции.'
-            },
-            { 
-                date: '2026-09-25', 
-                title: 'BNB Chain Hardfork', 
-                type: 'crypto', 
-                status: 'past',
-                forecast: 'Оптимизация комиссии и MEV',
-                bullScenario: 'Снижение комиссий внутри сети подняло активность On-Chain приложений.',
-                bearScenario: 'Краткосрочные паузы мостов во время обновления.'
-            },
-            { 
-                date: '2026-09-29', 
-                title: 'Выступление Пауэлла (ФРС)', 
-                type: 'macro', 
-                status: 'past',
-                forecast: 'Оценка экономического роста',
-                bullScenario: 'Нейтрально-мягкие комментарии успокоили рынки перед началом Q4.',
-                bearScenario: 'Предупреждение о сохранении рисков инфляции.'
-            },
-
-            // --- ТЕКУЩИЕ И БУДУЩИЕ СОБЫТИЯ ---
-            { 
-                date: '2026-10-01', 
-                title: 'Старт Q4 / Пересчет Портфелей', 
-                type: 'quarter', 
-                status: 'past',
-                forecast: 'Ребалансировка институционалов',
-                bullScenario: 'Крупный заток капитала в крипто-фонды перед закрытием года ("Uptober"). Давит цену BTC вверх.',
-                bearScenario: 'Фиксация прибыли фондами после Q3 и временный выход в кэш.'
-            },
-            { 
-                date: '2026-10-02', 
-                title: 'NFP США (Рынок Труда)', 
-                type: 'macro', 
-                status: 'past',
-                forecast: 'Прогноз: +160k рабочих мест',
-                bullScenario: 'Число мест < 120k: Ослабление рынка труда → ФРС ускоряет снижение ставок → BTC и Золото растут.',
-                bearScenario: 'Число мест > 200k: Сильная экономика → Ставки остаются высокими → Доллар (DXY) вверх, BTC/Золото вниз.'
-            },
-            { 
-                date: '2026-10-06', 
-                title: 'ETH Glamsterdam Testnet', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Активация обновления Ethereum',
-                bullScenario: 'Успешное тестирование повышает доверие к сети, подталкивая курс ETH и L2-токены вверх.',
-                bearScenario: 'Выявление технических багов вызывает краткосрочную коррекцию в L2-сегменте.'
-            },
-            { 
-                date: '2026-10-07', 
-                title: 'TOKEN2049 Singapore', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Крупнейший Web3-саммит года',
-                bullScenario: 'Анонсы ключевых институциональных продуктов создают позитивный новостной фон на рынке.',
-                bearScenario: 'Локальная продажа по факту ("sell the news") после завершения форума.'
-            },
-            { 
-                date: '2026-10-09', 
-                title: 'XRP Ledger Amendment', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Активация функций DEX и Batch-транзакций',
-                bullScenario: 'Рост ликвидности в сети XRP и всплеск интереса к крупным альткоинам.',
-                bearScenario: 'Снижение объема торгов после завершения хардфорка.'
-            },
-            { 
-                date: '2026-10-14', 
-                title: 'Инфляция CPI США', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Прогноз: 3.1% YoY',
-                bullScenario: 'CPI ≤ 2.9%: Инфляция снижается → Бычий импульс на $BTC (+3..5%) и Золоте (+1.5%).',
-                bearScenario: 'CPI ≥ 3.4%: Угроза рефляции → Продавцы давят курс BTC к нижним границам диапазона.'
-            },
-            { 
-                date: '2026-10-16', 
-                title: 'Arbitrum (ARB) Unlocks', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Плановый разблокированный клиф токенов',
-                bullScenario: 'Высокий спрос со стороны OTC-покупателей нивелирует предложение.',
-                bearScenario: 'Всплеск рыночных продаж со стороны инвесторов вызывает пролив монеты.'
-            },
-            { 
-                date: '2026-10-28', 
-                title: 'Заседание FOMC ФРС', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Прогноз: Снижение на -0.25%',
-                bullScenario: 'Снижение ставки на 0.25–0.50% + "мягкие" заявления ФРС → Рост BTC и Золота.',
-                bearScenario: 'Пауза (без изменений) + предупреждение о рисках → Коррекция рисковых активов.'
-            },
-            { 
-                date: '2026-11-03', 
-                title: 'Выборы США / Devcon 8', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Политическая ясность & Старт Devcon',
-                bullScenario: 'Принятие про-крипто законов (Clarity Act) запускает мощный бычий ралли на рынке.',
-                bearScenario: 'Политическая неопределенность и регуляторные споры провоцируют временный сброс позиций.'
-            },
-            { 
-                date: '2026-11-06', 
-                title: 'NFP США (Ноябрь)', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Оценка состояния рынка труда',
-                bullScenario: 'Рост безработицы → Переток средств в защитный PAXG (Золото) и BTC.',
-                bearScenario: 'Сильный прирост рабочих мест → Укрепление доллара давит на криптовалюту.'
-            },
-            { 
-                date: '2026-11-10', 
-                title: 'Инфляция CPI (Ноябрь)', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Прогноз замедления инфляции',
-                bullScenario: 'Ослабление CPI подпитывает ожидания смягчения политики ФРС в декабре.',
-                bearScenario: 'Неожиданный рост CPI приводит к локальному дампу альткоинов.'
-            },
-            { 
-                date: '2026-11-15', 
-                title: 'Solana Breakpoint', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Конференция экосистемы Solana',
-                bullScenario: 'Презентация обновления Alpenglow и масштабируемых протоколов вызывают импульс по SOL.',
-                bearScenario: 'Фиксация прибыли трейдерами по завершении ивента.'
-            },
-            { 
-                date: '2026-11-24', 
-                title: 'Monad Lock-up Cliff', 
-                type: 'crypto', 
-                status: 'upcoming',
-                forecast: 'Завершение периода блокировки токенов',
-                bullScenario: 'Сильный запуск тестнета удерживает покупательскую способность.',
-                bearScenario: 'Увеличение предложения монеты создает давление на цену.'
-            },
-            { 
-                date: '2026-12-09', 
-                title: 'Финальный FOMC 2026', 
-                type: 'macro', 
-                status: 'upcoming',
-                forecast: 'Решение по ставке на конец года',
-                bullScenario: 'Подтверждение курса на снижение ставок в 2027 г. → "Новогоднее ралли" (Santa Claus Rally).',
-                bearScenario: 'Жесткая риторика ФРС провоцирует закрытие позиций перед праздниками.'
-            }
+        // 🟢 НОВОСТИ ТОЛЬКО ДЛЯ BITCOIN (BTC)
+        const btcEvents = [
+            { date: '2026-09-20', title: 'Экспирация Фьючерсов BTC', type: 'crypto', status: 'past', forecast: 'Расчет контрактов', bullScenario: 'Удержание поддержки после закрытия позиций.', bearScenario: 'Волатильность перед закрытием.' },
+            { date: '2026-09-22', title: 'Solana Breakpoint', type: 'crypto', status: 'past', forecast: 'Анонс Firedancer', bullScenario: 'Импульс роста по альткоинам.', bearScenario: 'Продажа по факту.' },
+            { date: '2026-09-25', title: 'BNB Chain Hardfork', type: 'crypto', status: 'past', forecast: 'MEV-оптимизация', bullScenario: 'Рост активности сети.', bearScenario: 'Технические задержки.' },
+            { date: '2026-10-01', title: 'Старт Q4 / Uptober', type: 'quarter', status: 'past', forecast: 'Ребалансировка', bullScenario: 'Заток капитала в BTC-фонды.', bearScenario: 'Фиксация Q3.' },
+            { date: '2026-10-06', title: 'ETH Glamsterdam Testnet', type: 'crypto', status: 'upcoming', forecast: 'Тестнет ETH', bullScenario: 'Доверие к L2-сетям.', bearScenario: 'Баги в коде.' },
+            { date: '2026-10-07', title: 'TOKEN2049 Singapore', type: 'crypto', status: 'upcoming', forecast: 'Web3 Саммит', bullScenario: 'Анонсы институциональных продуктов.', bearScenario: 'Sell the news.' },
+            { date: '2026-10-09', title: 'XRP Ledger Amendment', type: 'crypto', status: 'upcoming', forecast: 'Обновление DEX', bullScenario: 'Всплеск ликвидности в альткоинах.', bearScenario: 'Спад объемов.' },
+            { date: '2026-10-16', title: 'Arbitrum (ARB) Unlocks', type: 'crypto', status: 'upcoming', forecast: 'Разблокировка', bullScenario: 'Поглощение OTC-спросом.', bearScenario: 'Дамп монеты.' },
+            { date: '2026-11-15', title: 'Solana Breakpoint', type: 'crypto', status: 'upcoming', forecast: 'Конференция', bullScenario: 'Импульс SOL.', bearScenario: 'Фиксация прибыли.' },
+            { date: '2026-11-24', title: 'Monad Lock-up Cliff', type: 'crypto', status: 'upcoming', forecast: 'Разблокировка', bullScenario: 'Рост тестнета.', bearScenario: 'Давление предложения.' }
         ];
+
+        // 🟡 НОВОСТИ ТОЛЬКО ДЛЯ ЗОЛОТА (PAXG / GOLD)
+        const goldEvents = [
+            { date: '2026-09-04', title: 'NFP США (Сентябрь)', type: 'macro', status: 'past', forecast: 'Факт: +142k', bullScenario: 'Ожидание снижения ставки ФРС.', bearScenario: 'Замедление экономики.' },
+            { date: '2026-09-11', title: 'Инфляция CPI США', type: 'macro', status: 'past', forecast: 'Факт: 2.5%', bullScenario: 'Падение инфляции усиливает золото.', bearScenario: 'Высокая базовая инфляция.' },
+            { date: '2026-09-18', title: 'Заседание ФРС (FOMC)', type: 'macro', status: 'past', forecast: 'Ставка -0.50%', bullScenario: 'Ослабление DXY, взлет Gold.', bearScenario: 'Фиксация факта.' },
+            { date: '2026-09-29', title: 'Выступление Пауэлла', type: 'macro', status: 'past', forecast: 'Риторика ФРС', bullScenario: 'Мягкая политика поддержит металлы.', bearScenario: 'Ястребиные тона.' },
+            { date: '2026-10-02', title: 'NFP США (Рынок труда)', type: 'macro', status: 'past', forecast: 'Прогноз: +160k', bullScenario: 'Слабый рынок труда → рост Золота.', bearScenario: 'Сильный $DXY давит золото.' },
+            { date: '2026-10-14', title: 'Инфляция CPI (Октябрь)', type: 'macro', status: 'upcoming', forecast: 'Прогноз: 3.1%', bullScenario: 'CPI ≤ 2.9%: Золото идет к новым вершинам.', bearScenario: 'Инфляция выше нормы.' },
+            { date: '2026-10-28', title: 'Заседание FOMC ФРС', type: 'macro', status: 'upcoming', forecast: 'Прогноз: -0.25%', bullScenario: 'Падение доходности трежерис → Gold Up.', bearScenario: 'Пауза по ставкам.' },
+            { date: '2026-11-03', title: 'Выборы в США', type: 'macro', status: 'upcoming', forecast: 'Выборы США', bullScenario: 'Защитный уход в Золото/PAXG.', bearScenario: 'Рост индекса доллара.' },
+            { date: '2026-11-06', title: 'NFP США (Ноябрь)', type: 'macro', status: 'upcoming', forecast: 'Рынок труда', bullScenario: 'Рост безработицы поднимет металлы.', bearScenario: 'Укрепление USD.' },
+            { date: '2026-12-09', title: 'Финальный FOMC 2026', type: 'macro', status: 'upcoming', forecast: 'Решение по ставке', bullScenario: 'Подтверждение снижения ставок.', bearScenario: 'Праздничное закрытие.' }
+        ];
+
+        // Получение событий в зависимости от выбранного символа
+        function getActiveEvents() {
+            const symbol = document.getElementById('symbol-select').value;
+            return symbol === 'BTCUSDT' ? btcEvents : goldEvents;
+        }
 
         function resizeCanvas() {
             overlayCanvas.width = chartElement.clientWidth;
@@ -520,7 +359,6 @@
 
         function drawOverlayLabels() {
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-
             const timeScale = chart.timeScale();
 
             mappedEvents.forEach((item, index) => {
@@ -528,7 +366,6 @@
                 
                 if (x !== null && x >= 0 && x <= overlayCanvas.width) {
                     ctx.save();
-                    // Лесенка из 3 уровневых смещений Y для компактности
                     ctx.translate(x, 180 + (index % 3) * 20); 
                     ctx.rotate(-Math.PI / 2);
 
@@ -552,15 +389,15 @@
                 </div>
 
                 <div class="impact-card">
-                    <div class="impact-title">Сценарии движения рынка</div>
+                    <div class="impact-title">Сценарии движения</div>
                     
                     <div class="scenario-box bullish">
-                        <b>🟢 Бычий сценарий (Рост BTC / PAXG / Альтов):</b><br>
+                        <b>🟢 Бычий сценарий:</b><br>
                         ${event.bullScenario}
                     </div>
 
                     <div class="scenario-box bearish">
-                        <b>🔴 Медвежий сценарий (Падение):</b><br>
+                        <b>🔴 Медвежий сценарий:</b><br>
                         ${event.bearScenario}
                     </div>
                 </div>
@@ -571,11 +408,13 @@
             clearEventLines();
             candlestickSeries.setMarkers([]);
 
+            const currentEvents = getActiveEvents();
+
             const validPrices = klines.filter(k => k.low !== undefined);
             const minPrice = Math.min(...validPrices.map(k => k.low));
             const maxPrice = Math.max(...validPrices.map(k => k.high));
 
-            calendarEvents.forEach(evt => {
+            currentEvents.forEach(evt => {
                 const rawSec = Math.floor(new Date(evt.date + 'T00:00:00Z').getTime() / 1000);
                 const exactTime = findClosestTime(klines, rawSec);
 
@@ -609,7 +448,7 @@
             drawOverlayLabels();
 
             const listEl = document.getElementById('event-list');
-            listEl.innerHTML = calendarEvents.map((e, idx) => `
+            listEl.innerHTML = currentEvents.map((e, idx) => `
                 <div class="event-item ${e.status}" onclick="selectEvent(${idx})">
                     <div class="event-info">
                         <span class="event-date">${e.date}</span>
@@ -623,7 +462,8 @@
         }
 
         window.selectEvent = function(index) {
-            const evt = calendarEvents[index];
+            const currentEvents = getActiveEvents();
+            const evt = currentEvents[index];
             showEventDetails(evt);
 
             const rawSec = Math.floor(new Date(evt.date + 'T00:00:00Z').getTime() / 1000);
@@ -637,18 +477,20 @@
             const symbol = document.getElementById('symbol-select').value;
             const interval = document.getElementById('interval-select').value;
 
+            document.getElementById('calendar-title').innerText = symbol === 'BTCUSDT' ? 'Крипто Новости (BTC)' : 'Макро Новости (Золото)';
             legendElement.innerText = `Загрузка ${symbol}...`;
 
             try {
                 let klines = await fetchKlines(symbol, interval);
                 
-                const maxDate = calendarEvents.reduce((max, e) => e.date > max ? e.date : max, calendarEvents[0].date);
+                const currentEvents = getActiveEvents();
+                const maxDate = currentEvents.reduce((max, e) => e.date > max ? e.date : max, currentEvents[0].date);
                 klines = fillFutureWhitespace(klines, maxDate, interval);
 
                 candlestickSeries.setData(klines);
                 renderCalendarOverlay(klines);
                 
-                legendElement.innerText = `${symbol} (${interval}) — История и будущие события загружены`;
+                legendElement.innerText = `${symbol} (${interval}) — Новости разделены по активам`;
             } catch (err) {
                 console.error(err);
                 legendElement.innerText = `Ошибка загрузки данных.`;
