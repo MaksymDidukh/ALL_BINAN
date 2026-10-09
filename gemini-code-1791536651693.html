@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Trading Strategy Backtester (Order Block & Turtle Soup)</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { color: #4CAF50; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .panel {
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background-color: #45a049; }
+        select, input {
+            background: #2d2d2d;
+            color: white;
+            border: 1px solid #444;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        #chart-container {
+            width: 100%;
+            height: 450px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+        .stat-card h3 { margin: 0 0 5px 0; font-size: 14px; color: #aaa; }
+        .stat-card p { margin: 0; font-size: 20px; font-weight: bold; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #1e1e1e;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        th, td { padding: 10px 15px; text-align: left; border-bottom: 1px solid #2d2d2d; font-size: 13px; }
+        th { background: #252525; }
+        .win { color: #4CAF50; }
+        .loss { color: #f44336; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Бэктест стратегий: Order Block vs Turtle Soup (Депозит: $10)</h2>
+    
+    <div class="panel">
+        <label>Стратегия: 
+            <select id="strategyChoice">
+                <option value="orderBlock">1. Order Block (Тест зоны блока)</option>
+                <option value="turtleSoup">2. Turtle Soup (Ложный пробой по тренду)</option>
+            </select>
+        </label>
+        <label>Пара: 
+            <select id="symbol">
+                <option value="BTCUSDT">BTCUSDT</option>
+                <option value="ETHUSDT">ETHUSDT</option>
+                <option value="XAUTUSDT">XAUTUSDT (Gold)</option>
+            </select>
+        </label>
+        <label>Таймфрейм: 
+            <select id="interval">
+                <option value="1h">1h</option>
+                <option value="4h" selected>4h</option>
+            </select>
+        </label>
+        <label>Риск ($): <input type="number" id="riskAmount" value="2" min="0.5" max="10" step="0.5"></label>
+        <button onclick="runBacktest()">Запустить тест</button>
+    </div>
+
+    <div id="chart-container"></div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Итоговый баланс</h3>
+            <p id="finalBalance">$10.00</p>
+        </div>
+        <div class="stat-card">
+            <h3>Винрейт (Winrate)</h3>
+            <p id="winRate">0%</p>
+        </div>
+        <div class="stat-card">
+            <h3>Всего сделок</h3>
+            <p id="totalTrades">0</p>
+        </div>
+        <div class="stat-card">
+            <h3>Прибыль / Убыток</h3>
+            <p id="netProfit">$0.00</p>
+        </div>
+    </div>
+
+    <h3>Журнал сделок</h3>
+    <div style="max-height: 300px; overflow-y: auto;">
+        <table id="tradesTable">
+            <thead>
+                <tr>
+                    <th>№</th>
+                    <th>Время</th>
+                    <th>Тип</th>
+                    <th>Вход</th>
+                    <th>Стоп-лосс</th>
+                    <th>Тейк-профит</th>
+                    <th>Результат</th>
+                    <th>P&L ($)</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    let chart, candleSeries;
+
+    function initChart() {
+        const container = document.getElementById('chart-container');
+        chart = LightweightCharts.createChart(container, {
+            layout: { background: { type: 'solid', color: '#161616' }, textColor: '#D9D9D9' },
+            grid: { vertLines: { color: '#222' }, horzLines: { color: '#222' } },
+            timeScale: { timeVisible: true, secondsVisible: false }
+        });
+        candleSeries = chart.addCandlestickSeries({
+            upColor: '#4CAF50', downColor: '#f44336', borderVisible: false,
+            wickUpColor: '#4CAF50', wickDownColor: '#f44336'
+        });
+    }
+
+    initChart();
+
+    function calculateSMA(data, period) {
+        let sma = [];
+        for (let i = 0; i < data.length; i++) {
+            if (i < period) { sma.push(null); continue; }
+            let sum = 0;
+            for (let j = 0; j < period; j++) { sum += data[i - j].close; }
+            sma.push(sum / period);
+        }
+        return sma;
+    }
+
+    async function runBacktest() {
+        const strategy = document.getElementById('strategyChoice').value;
+        const symbol = document.getElementById('symbol').value;
+        const interval = document.getElementById('interval').value;
+        const initialDeposit = 10.00;
+        let balance = initialDeposit;
+        const riskPerTrade = parseFloat(document.getElementById('riskAmount').value);
+
+        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=500`;
+
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            const candles = data.map(c => ({
+                time: c[0] / 1000,
+                open: parseFloat(c[1]),
+                high: parseFloat(c[2]),
+                low: parseFloat(c[3]),
+                close: parseFloat(c[4])
+            }));
+
+            candleSeries.setData(candles);
+            const sma100 = calculateSMA(candles, 100);
+
+            let trades = [];
+            let wins = 0;
+            let losses = 0;
+            let chartMarkers = [];
+            const lookback = 15;
+
+            for (let i = 100; i < candles.length - 5; i++) {
+                if (balance <= 0) break;
+
+                const curr = candles[i];
+                const prev = candles[i - 1];
+                const trend = sma100[i];
+                if (!trend) continue;
+
+                let executeTrade = false;
+                let isLong = false;
+                let stopLoss = 0;
+
+                if (strategy === 'orderBlock') {
+                    // Стратегия Order Block: 
+                    // Бычий ордер-блок: импульсная зеленая свеча, перед которой была последняя красная (ее тело/фитиль формируют зону поддержки)
+                    // Медвежий ордер-блок: импульсная красная свеча, перед которой была последняя зеленая
+                    const isImpulseUp = curr.close > curr.open && (curr.close - curr.open) > (curr.high - curr.low) * 0.5;
+                    const isImpulseDown = curr.close < curr.open && (curr.open - curr.close) > (curr.high - curr.low) * 0.5;
+
+                    // Если на предыдущей свече был импульс вверх по тренду, а текущая возвращается тестировать ее уровень
+                    if (prev.close > prev.open && curr.low <= prev.high && curr.close > trend) {
+                        isLong = true;
+                        executeTrade = true;
+                        stopLoss = prev.low - 0.5; // Стоп за основание тени блока
+                    } 
+                    else if (prev.close < prev.open && curr.high >= prev.low && curr.close < trend) {
+                        isLong = false;
+                        executeTrade = true;
+                        stopLoss = prev.high + 0.5; // Стоп за вершину тени блока
+                    }
+                } 
+                else if (strategy === 'turtleSoup') {
+                    // Стратегия Turtle Soup (Ложный пробой по тренду)
+                    let highest = -Infinity;
+                    let lowest = Infinity;
+                    for (let j = i - lookback; j < i; j++) {
+                        if (candles[j].high > highest) highest = candles[j].high;
+                        if (candles[j].low < lowest) lowest = candles[j].low;
+                    }
+
+                    if (curr.low < lowest && curr.close > lowest && curr.close > trend) {
+                        executeTrade = true;
+                        isLong = true;
+                        stopLoss = curr.low - 0.5;
+                    } else if (curr.high > highest && curr.close < highest && curr.close < trend) {
+                        executeTrade = true;
+                        isLong = false;
+                        stopLoss = curr.high + 0.5;
+                    }
+                }
+
+                if (executeTrade) {
+                    const entryPrice = curr.close;
+                    const risk = Math.abs(entryPrice - stopLoss);
+                    if (risk === 0) continue;
+
+                    const tp = isLong ? entryPrice + (risk * 2) : entryPrice - (risk * 2);
+
+                    let tradeResult = null;
+                    for (let j = i + 1; j < Math.min(i + 20, candles.length); j++) {
+                        const fc = candles[j];
+                        if (isLong) {
+                            if (fc.low <= stopLoss) { tradeResult = 'loss'; break; }
+                            if (fc.high >= tp) { tradeResult = 'win'; break; }
+                        } else {
+                            if (fc.high >= stopLoss) { tradeResult = 'loss'; break; }
+                            if (fc.low <= tp) { tradeResult = 'win'; break; }
+                        }
+                    }
+
+                    if (tradeResult) {
+                        let pnl = tradeResult === 'win' ? riskPerTrade * 2 : -riskPerTrade;
+                        balance += pnl;
+                        if (tradeResult === 'win') wins++; else losses++;
+
+                        trades.push({
+                            id: trades.length + 1,
+                            time: new Date(curr.time * 1000).toLocaleString(),
+                            type: isLong ? 'LONG' : 'SHORT',
+                            entry: entryPrice.toFixed(2),
+                            sl: stopLoss.toFixed(2),
+                            tp: tp.toFixed(2),
+                            result: tradeResult,
+                            pnl: pnl.toFixed(2)
+                        });
+
+                        chartMarkers.push({
+                            time: curr.time,
+                            position: isLong ? 'belowBar' : 'aboveBar',
+                            color: isLong ? '#4CAF50' : '#f44336',
+                            shape: isLong ? 'arrowUp' : 'arrowDown',
+                            text: isLong ? 'OB Buy' : 'OB Sell'
+                        });
+
+                        i += 3;
+                    }
+                }
+            }
+
+            candleSeries.setMarkers(chartMarkers);
+
+            const totalTrades = wins + losses;
+            const winrate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : 0;
+            const netProfit = balance - initialDeposit;
+
+            document.getElementById('finalBalance').innerText = `$${balance.toFixed(2)}`;
+            document.getElementById('finalBalance').style.color = balance >= initialDeposit ? '#4CAF50' : '#f44336';
+            document.getElementById('winRate').innerText = `${winrate}%`;
+            document.getElementById('totalTrades').innerText = totalTrades;
+            document.getElementById('netProfit').innerText = `${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)}`;
+            document.getElementById('netProfit').style.color = netProfit >= 0 ? '#4CAF50' : '#f44336';
+
+            const tbody = document.querySelector('#tradesTable tbody');
+            tbody.innerHTML = '';
+            trades.forEach(t => {
+                tbody.innerHTML += `
+                    <tr>
+                        <td>${t.id}</td>
+                        <td>${t.time}</td>
+                        <td><b>${t.type}</b></td>
+                        <td>${t.entry}</td>
+                        <td>${t.sl}</td>
+                        <td>${t.tp}</td>
+                        <td class="${t.result === 'win' ? 'win' : 'loss'}">${t.result.toUpperCase()}</td>
+                        <td class="${t.result === 'win' ? 'win' : 'loss'}">${t.pnl > 0 ? '+' : ''}${t.pnl}$</td>
+                    </tr>
+                `;
+            });
+
+        } catch (error) {
+            alert('Ошибка загрузки данных: ' + error.message);
+        }
+    }
+</script>
+
+</body>
+</html>
